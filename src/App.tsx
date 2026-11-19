@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { onIdTokenChanged, signOut } from 'firebase/auth';
 import {
+  ArrowLeft,
   Bell,
   Building2,
   ChevronDown,
@@ -58,6 +59,11 @@ export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [activeNav, setActiveNav] = useState<NavKey>('dashboard');
+  const [navHistory, setNavHistory] = useState<NavKey[]>([]);
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState<boolean>(() => {
+    const saved = localStorage.getItem('hf_sidebar_open');
+    return saved !== 'false';
+  });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [openAddClientFlag, setOpenAddClientFlag] = useState(false);
   const [searchPrefill, setSearchPrefill] = useState<{
@@ -141,6 +147,44 @@ export default function App() {
   };
 
   useEffect(() => {
+    localStorage.setItem('hf_sidebar_open', String(desktopSidebarOpen));
+  }, [desktopSidebarOpen]);
+
+  const selectNav = useCallback(
+    (key: NavKey) => {
+      if (activeNav !== key) {
+        setNavHistory((prev) => {
+          const next =
+            prev[prev.length - 1] === activeNav ? prev : [...prev, activeNav];
+          return next.slice(-30);
+        });
+        setActiveNav(key);
+      }
+      setMobileMenuOpen(false);
+    },
+    [activeNav]
+  );
+
+  const handleBack = useCallback(() => {
+    if (activeNav === 'dashboard') return;
+    setSearchPrefill(null);
+    setStatusPrefill(null);
+    setMobileMenuOpen(false);
+    const previousPage =
+      navHistory.length > 0 ? navHistory[navHistory.length - 1] : 'dashboard';
+    setNavHistory((prev) => prev.slice(0, -1));
+    setActiveNav(previousPage);
+  }, [activeNav, navHistory]);
+
+  const toggleSidebar = useCallback(() => {
+    if (window.matchMedia('(min-width: 1024px)').matches) {
+      setDesktopSidebarOpen((open) => !open);
+    } else {
+      setMobileMenuOpen((open) => !open);
+    }
+  }, []);
+
+  useEffect(() => {
     const handlePointerDown = (e: MouseEvent) => {
       if (
         accountMenuRef.current &&
@@ -152,7 +196,21 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setAccountMenuOpen(false);
+        setMobileMenuOpen(false);
         if (!signingOut) setConfirmLogoutOpen(false);
+      }
+      if (e.altKey && e.key === 'ArrowLeft' && activeNav !== 'dashboard') {
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName;
+        if (
+          tag !== 'INPUT' &&
+          tag !== 'TEXTAREA' &&
+          tag !== 'SELECT' &&
+          !target?.isContentEditable
+        ) {
+          e.preventDefault();
+          handleBack();
+        }
       }
     };
     document.addEventListener('mousedown', handlePointerDown);
@@ -161,7 +219,7 @@ export default function App() {
       document.removeEventListener('mousedown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [signingOut]);
+  }, [signingOut, activeNav, handleBack]);
 
   useEffect(() => {
     const unsubscribe = onIdTokenChanged(auth, async (fbUser) => {
@@ -221,6 +279,7 @@ export default function App() {
       // 4. Reset application session state cleanly
       setUser(null);
       setActiveNav('dashboard');
+      setNavHistory([]);
       setSearchPrefill(null);
       setStatusPrefill(null);
       setUnreadNotifications(0);
@@ -304,45 +363,54 @@ export default function App() {
   const activeTitle =
     visibleNav.find((i) => i.key === activeNav)?.label || 'Dashboard';
 
-  const selectNav = (key: NavKey) => {
-    setActiveNav(key);
-    setMobileMenuOpen(false);
-  };
+  const previousNavKey: NavKey =
+    navHistory.length > 0 ? navHistory[navHistory.length - 1] : 'dashboard';
+  const previousTitle =
+    visibleNav.find((i) => i.key === previousNavKey)?.label || 'Dashboard';
 
   return (
     <div className="flex min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       {/* Mobile Sidebar Overlay */}
       {mobileMenuOpen && (
         <div
-          className="fixed inset-0 z-40 bg-slate-950/50 lg:hidden"
+          className="fixed inset-0 z-40 bg-slate-950/50 backdrop-blur-[1px] lg:hidden"
           onClick={() => setMobileMenuOpen(false)}
         />
       )}
 
-      {/* Sidebar (256px) */}
-      <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-slate-200 bg-white transition-transform duration-150 dark:border-slate-800 dark:bg-slate-900 lg:static lg:translate-x-0 ${
-          mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
+      {/* Slide-Out Sidebar Drawer (256px, collapsible on desktop & mobile) */}
+      <div
+        className={`lg:relative lg:shrink-0 lg:overflow-hidden lg:transition-[width] lg:duration-200 lg:ease-out ${
+          desktopSidebarOpen ? 'lg:w-64' : 'lg:w-0'
         }`}
       >
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-slate-800">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-600 text-white shrink-0">
-              <Server className="h-4 w-4" />
-            </div>
-            <span className="text-base font-bold tracking-tight whitespace-nowrap shrink-0">
-              Host Finder
-            </span>
+        <aside
+          className={`fixed inset-y-0 left-0 z-50 flex h-full w-64 flex-col border-r border-slate-200 bg-white transition-transform duration-200 ease-out dark:border-slate-800 dark:bg-slate-900 lg:sticky lg:top-0 lg:h-screen ${
+            mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
+          } ${desktopSidebarOpen ? 'lg:translate-x-0' : 'lg:-translate-x-full'}`}
+        >
+          <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-slate-800">
+            <button
+              type="button"
+              onClick={() => selectNav('dashboard')}
+              className="flex items-center gap-2.5 text-left"
+            >
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-600 text-white shrink-0">
+                <Server className="h-4 w-4" />
+              </div>
+              <span className="text-base font-bold tracking-tight whitespace-nowrap shrink-0">
+                Host Finder
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen(false)}
+              className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 lg:hidden dark:hover:bg-slate-800 dark:hover:text-slate-200"
+              aria-label="Close sidebar"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => setMobileMenuOpen(false)}
-            className="rounded-lg p-1 text-slate-400 hover:text-slate-700 lg:hidden"
-            aria-label="Close sidebar"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
 
         <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-4">
           {visibleNav.map((item) => {
@@ -404,20 +472,37 @@ export default function App() {
             <span>{signingOut ? 'Signing out...' : 'Sign Out'}</span>
           </button>
         </div>
-      </aside>
+        </aside>
+      </div>
 
       {/* Main Content Shell */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-3.5 dark:border-slate-800 dark:bg-slate-900">
-          <div className="flex items-center gap-3 min-w-0">
+        <header className="sticky top-0 z-30 flex items-center justify-between gap-4 border-b border-slate-200 bg-white px-4 py-3.5 sm:px-6 dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex items-center gap-2.5 min-w-0">
             <button
               type="button"
-              onClick={() => setMobileMenuOpen(true)}
-              className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-100 lg:hidden dark:border-slate-700 dark:text-slate-300"
-              aria-label="Open menu"
+              onClick={toggleSidebar}
+              aria-label="Toggle sidebar menu"
+              aria-expanded={desktopSidebarOpen || mobileMenuOpen}
+              title={desktopSidebarOpen ? 'Slide sidebar closed' : 'Slide sidebar open'}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
             >
               <Menu className="h-4 w-4" />
             </button>
+
+            {activeNav !== 'dashboard' && (
+              <button
+                type="button"
+                onClick={handleBack}
+                title={`Back to ${previousTitle}`}
+                aria-label={`Back to ${previousTitle}`}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 dark:hover:text-white whitespace-nowrap shrink-0"
+              >
+                <ArrowLeft className="h-3.5 w-3.5 shrink-0" />
+                <span className="hidden sm:inline">Back</span>
+              </button>
+            )}
+
             <h1 className="truncate text-base font-semibold tracking-tight text-slate-900 dark:text-slate-100">
               {activeTitle}
             </h1>

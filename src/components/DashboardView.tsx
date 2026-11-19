@@ -1,15 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import {
-  Bell,
-  Download,
-  Plus,
-  Search,
-  Upload,
-} from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Bell } from 'lucide-react';
 import { Client, NotificationItem } from '../types';
 import {
   apiFetch,
-  downloadAuthenticatedFile,
   formatDate,
   formatMoney,
 } from '../utils/api';
@@ -44,25 +37,20 @@ interface DashboardSummary {
 export function DashboardView({
   currency,
   isAdmin,
-  canExportExcel = true,
   onNavigate,
-  onOpenAddClient,
   onToast,
 }: {
   currency: string;
   isAdmin: boolean;
   canExportExcel?: boolean;
   onNavigate: (tab: string, statusFilter?: string) => void;
-  onOpenAddClient: () => void;
+  onOpenAddClient?: () => void;
   onToast: (msg: string, type?: 'success' | 'error') => void;
 }) {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('All');
   const [expiryTab, setExpiryTab] = useState<'upcoming' | 'expired'>('upcoming');
-  const [exportingExcel, setExportingExcel] = useState(false);
   const [updatingKey, setUpdatingKey] = useState<string | null>(null);
 
   const loadData = async (silent = false) => {
@@ -78,21 +66,6 @@ export function DashboardView({
       onToast((err as Error).message || 'Failed to load dashboard data', 'error');
     } finally {
       if (!silent) setLoading(false);
-    }
-  };
-
-  const handleExportExcel = async () => {
-    setExportingExcel(true);
-    try {
-      const filename = await downloadAuthenticatedFile(
-        '/api/excel/export?type=clients',
-        'host_finder_clients.xlsx'
-      );
-      onToast(`Downloaded ${filename}`, 'success');
-    } catch (err) {
-      onToast((err as Error).message, 'error');
-    } finally {
-      setExportingExcel(false);
     }
   };
 
@@ -146,22 +119,6 @@ export function DashboardView({
   useEffect(() => {
     loadData();
   }, []);
-
-  const filteredClients = useMemo(() => {
-    return clients.filter((c) => {
-      const q = search.toLowerCase();
-      const matchQ =
-        !q ||
-        c.clientId.toLowerCase().includes(q) ||
-        c.clientName.toLowerCase().includes(q) ||
-        c.companyName.toLowerCase().includes(q) ||
-        c.email.toLowerCase().includes(q) ||
-        c.serviceProvider.toLowerCase().includes(q);
-      const matchStatus =
-        statusFilter === 'All' || c.accountStatus === statusFilter;
-      return matchQ && matchStatus;
-    });
-  }, [clients, search, statusFilter]);
 
   if (loading || !summary) {
     return <TableSkeleton rows={6} />;
@@ -219,68 +176,6 @@ export function DashboardView({
 
   return (
     <div className="space-y-6">
-      {/* Quick Action Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-1 flex-wrap items-center gap-3">
-          <div className="relative min-w-[240px] flex-1 max-w-sm">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search clients by ID, name, company, provider..."
-              className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100"
-            />
-          </div>
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-blue-500 focus:outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
-          >
-            <option value="All">All Statuses</option>
-            <option value="Active">Active</option>
-            <option value="Upcoming Expiry">Upcoming Expiry</option>
-            <option value="Expired">Expired</option>
-            <option value="Renewed">Renewed</option>
-            <option value="Cancelled">Cancelled</option>
-          </select>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={() => onNavigate('excel')}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
-            >
-              <Upload className="h-3.5 w-3.5" />
-              Import Excel
-            </button>
-          )}
-          {canExportExcel && (
-            <button
-              type="button"
-              onClick={handleExportExcel}
-              disabled={exportingExcel}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
-            >
-              <Download className="h-3.5 w-3.5" />
-              {exportingExcel ? 'Exporting...' : 'Export Excel'}
-            </button>
-          )}
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={onOpenAddClient}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-700 whitespace-nowrap shrink-0"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add Client
-            </button>
-          )}
-        </div>
-      </div>
-
       {/* 8 KPI Cards (Single-Elevation Grid) */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         {kpis.map((kpi) => (
@@ -452,11 +347,11 @@ export function DashboardView({
         </div>
       </div>
 
-      {/* Searchable & Filterable Client Directory Snapshot */}
+      {/* Client Directory Snapshot */}
       <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5 dark:border-slate-800">
           <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-            Client Records ({filteredClients.length})
+            Client Records ({clients.length})
           </h2>
           <button
             type="button"
@@ -480,7 +375,7 @@ export function DashboardView({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80">
-              {filteredClients.slice(0, 8).map((c) => (
+              {clients.slice(0, 8).map((c) => (
                 <tr key={c._id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40">
                   <td className="px-5 py-2.5 font-mono text-slate-700 dark:text-slate-300">
                     {c.clientId}
