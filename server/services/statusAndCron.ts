@@ -26,6 +26,14 @@ export function daysUntil(dateInput: string | Date): number {
   return Math.ceil((startOfTarget - startOfToday) / (1000 * 60 * 60 * 24));
 }
 
+const VALID_SERVICE_STATUSES: ServiceStatus[] = [
+  'Active',
+  'Upcoming Expiry',
+  'Expired',
+  'Renewed',
+  'Cancelled',
+];
+
 export function computeServiceStatus(
   expiryDate: string | Date,
   manualStatus?: string
@@ -36,6 +44,51 @@ export function computeServiceStatus(
   if (days <= 30) return 'Upcoming Expiry';
   if (manualStatus === 'Renewed') return 'Renewed';
   return 'Active';
+}
+
+export function resolveServiceStatus(options: {
+  expiryDate: string | Date;
+  requestedStatus?: string;
+  existingStatus?: string;
+  dateChanged?: boolean;
+}): ServiceStatus {
+  const { expiryDate, requestedStatus, existingStatus, dateChanged } = options;
+  const isValidRequested =
+    typeof requestedStatus === 'string' &&
+    (VALID_SERVICE_STATUSES as string[]).includes(requestedStatus);
+
+  // On create (no existingStatus): honor an explicitly selected status; otherwise auto-compute from date.
+  if (!existingStatus) {
+    if (isValidRequested) return requestedStatus as ServiceStatus;
+    return computeServiceStatus(expiryDate);
+  }
+
+  // On update: if the user explicitly picked a different status, always persist their choice.
+  if (isValidRequested && requestedStatus !== existingStatus) {
+    return requestedStatus as ServiceStatus;
+  }
+
+  // If the expiry/end date was changed without changing status, recalculate unless Cancelled.
+  if (dateChanged) {
+    return computeServiceStatus(expiryDate, existingStatus);
+  }
+
+  // Otherwise keep the explicitly submitted or existing status intact.
+  if (isValidRequested) return requestedStatus as ServiceStatus;
+  return (existingStatus as ServiceStatus) || computeServiceStatus(expiryDate);
+}
+
+function autoTransitionOnExpiryScan(
+  expiryDate: string | Date,
+  currentStatus?: string
+): ServiceStatus {
+  if (currentStatus === 'Cancelled' || currentStatus === 'Renewed') {
+    return currentStatus;
+  }
+  const days = daysUntil(expiryDate);
+  if (days < 0) return 'Expired';
+  if (days <= 30 && currentStatus === 'Active') return 'Upcoming Expiry';
+  return (currentStatus as ServiceStatus) || computeServiceStatus(expiryDate);
 }
 
 async function sendSmtpReminderEmail(subject: string, textBody: string) {
@@ -85,6 +138,11 @@ export async function runExpiryCheck(): Promise<{
   checkedDomains: number;
   newNotifications: number;
 }> {
+  const { isSqlConfigured } = await import('../../src/db/index.ts');
+  const { isDatabaseConnected, isPreviewFallbackActive } = await import('../config/database.js');
+  if (!isSqlConfigured() && !isDatabaseConnected() && !isPreviewFallbackActive()) {
+    return { checkedHosting: 0, checkedDomains: 0, newNotifications: 0 };
+  }
   const hostingList = await db.hosting_services.find();
   const domainList = await db.domains.find();
   let newNotifications = 0;
@@ -99,7 +157,7 @@ export async function runExpiryCheck(): Promise<{
   };
 
   for (const h of hostingList) {
-    const nextStatus = computeServiceStatus(h.expiryDate, h.accountStatus);
+    const nextStatus = autoTransitionOnExpiryScan(h.expiryDate, h.accountStatus);
     if (nextStatus !== h.accountStatus) {
       await db.hosting_services.updateById(h._id, { accountStatus: nextStatus });
     }
@@ -136,7 +194,7 @@ export async function runExpiryCheck(): Promise<{
   }
 
   for (const d of domainList) {
-    const nextStatus = computeServiceStatus(d.expiryDate, d.accountStatus);
+    const nextStatus = autoTransitionOnExpiryScan(d.expiryDate, d.accountStatus);
     if (nextStatus !== d.accountStatus) {
       await db.domains.updateById(d._id, { accountStatus: nextStatus });
     }
@@ -175,7 +233,7 @@ export async function runExpiryCheck(): Promise<{
   // Also refresh client statuses
   const clients = await db.clients.find();
   for (const c of clients) {
-    const nextStatus = computeServiceStatus(c.endDate, c.accountStatus);
+    const nextStatus = autoTransitionOnExpiryScan(c.endDate, c.accountStatus);
     if (nextStatus !== c.accountStatus) {
       await db.clients.updateById(c._id, { accountStatus: nextStatus });
     }

@@ -11,6 +11,7 @@ import {
   requireAuth,
   requireRole,
 } from '../middleware/auth.js';
+import { buildProjectSourceZip } from '../services/sourceZip.js';
 import { computeServiceStatus, runExpiryCheck } from '../services/statusAndCron.js';
 import { encryptField, maskLast4, maskSecret } from '../utils/crypto.js';
 
@@ -644,7 +645,14 @@ router.get('/excel/export', requireAuth, requireRole('admin', 'staff'), async (r
       if (req.user!.role === 'staff' && !req.user!.assignedClientIds.includes(item.clientId)) {
         return false;
       }
-      if (statusFilter && item.accountStatus !== statusFilter && item.status !== statusFilter) return false;
+      if (
+        statusFilter &&
+        item.accountStatus !== statusFilter &&
+        item.status !== statusFilter &&
+        item.paymentStatus !== statusFilter
+      ) {
+        return false;
+      }
       if (clientFilter && item.clientId !== clientFilter) return false;
       if (providerFilter && !String(item[providerField] || '').toLowerCase().includes(providerFilter)) return false;
       if (fromDate || toDate) {
@@ -971,6 +979,27 @@ router.put('/settings', requireAuth, requireRole('admin'), async (req: AuthedReq
   return res.json({ settings: updated });
 });
 
+router.get('/system/export-source', requireAuth, requireRole('admin'), async (req: AuthedRequest, res) => {
+  try {
+    const { buffer, fileCount } = await buildProjectSourceZip();
+    await logActivity(
+      req,
+      'EXPORT_SOURCE_ZIP',
+      'system',
+      '',
+      `Exported project source ZIP (${fileCount} files)`
+    );
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="host-finder-source.zip"');
+    res.setHeader('X-Archive-File-Count', String(fileCount));
+    return res.send(buffer);
+  } catch (err) {
+    return res.status(500).json({
+      error: (err as Error).message || 'Failed to generate project source ZIP',
+    });
+  }
+});
+
 router.get('/docs', requireAuth, (_req, res) => {
   return res.json({
     version: '1.0.0',
@@ -979,9 +1008,10 @@ router.get('/docs', requireAuth, (_req, res) => {
       { method: 'POST', path: '/api/auth/login', auth: 'Public (Rate Limited)', description: 'Authenticate user, enforce 5-attempt lockout, optional TOTP 2FA' },
       { method: 'POST', path: '/api/auth/change-password', auth: 'Bearer / Cookie', description: 'Update user password and clear first-login flag' },
       { method: 'GET', path: '/api/dashboard/summary', auth: 'All Roles', description: 'Fetch 8 KPI metrics, upcoming/expired lists, and notifications' },
-      { method: 'GET/POST/PUT/DELETE', path: '/api/clients', auth: 'Admin (Write) / Staff+Viewer (Read)', description: 'Manage clients with auto-generated HF-CLT IDs' },
-      { method: 'GET/POST/PUT/DELETE', path: '/api/hosting', auth: 'Admin / Authorized Staff', description: 'Manage hosting services with AES-256-GCM password encryption' },
-      { method: 'GET/POST/PUT/DELETE', path: '/api/domains', auth: 'Admin / Authorized Staff', description: 'Manage domain registrars, DNS details, nameservers, and auto-expiry status' },
+      { method: 'GET', path: '/api/search', auth: 'All Roles', description: 'Global lookup across clients, hosting services, and domains by name or ID' },
+      { method: 'GET/POST/PUT/PATCH/DELETE', path: '/api/clients', auth: 'Admin (Write) / Staff+Viewer (Read)', description: 'Manage clients, inline account & payment statuses, with auto-generated HF-CLT IDs' },
+      { method: 'GET/POST/PUT/PATCH/DELETE', path: '/api/hosting', auth: 'Admin / Authorized Staff', description: 'Manage hosting services, inline statuses, and AES-256-GCM password encryption' },
+      { method: 'GET/POST/PUT/PATCH/DELETE', path: '/api/domains', auth: 'Admin / Authorized Staff', description: 'Manage domain registrars, DNS details, nameservers, and inline status updates' },
       { method: 'GET/POST/PUT/DELETE', path: '/api/providers', auth: 'Admin (Write) / All (Read Masked)', description: 'Manage Domain, Hosting, Server, Email, and Payment providers' },
       { method: 'POST', path: '/api/secrets/reveal', auth: 'Admin Only', description: 'Audited decryption of a single password, API secret, or bank account' },
       { method: 'GET/PUT', path: '/api/gateways', auth: 'Admin Only', description: 'Configure Razorpay, SMTP, Google Play, Apple App Store with strict Test/Live isolation' },
@@ -992,6 +1022,7 @@ router.get('/docs', requireAuth, (_req, res) => {
       { method: 'GET', path: '/api/excel/export', auth: 'Admin / Staff', description: 'Export filtered Clients, Hosting, Domains, Upcoming, Expired, or Payments to .xlsx' },
       { method: 'GET/PATCH/POST', path: '/api/notifications', auth: 'All Roles', description: 'View 30d/15d/7d/1d expiry reminders and trigger manual scan' },
       { method: 'GET/POST/PUT/DELETE', path: '/api/users', auth: 'Admin Only', description: 'RBAC user management, client assignment, and lockout reset' },
+      { method: 'GET', path: '/api/system/export-source', auth: 'Admin Only', description: 'Download complete Host Finder project source as a ZIP archive' },
     ],
   });
 });

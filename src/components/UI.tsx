@@ -104,6 +104,42 @@ export function StatusLabel({ status }: { status: string }) {
   );
 }
 
+export function InlineStatusSelect<T extends string>({
+  value,
+  options,
+  onChange,
+  disabled = false,
+  ariaLabel = 'Change status',
+}: {
+  value: T;
+  options: readonly T[];
+  onChange: (next: T) => void;
+  disabled?: boolean;
+  ariaLabel?: string;
+}) {
+  return (
+    <select
+      aria-label={ariaLabel}
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value as T)}
+      className={`cursor-pointer rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition-colors hover:border-slate-300 focus:border-blue-500 focus:outline-none disabled:cursor-wait disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:hover:border-slate-600 ${statusColorClass(
+        value
+      )}`}
+    >
+      {options.map((opt) => (
+        <option
+          key={opt}
+          value={opt}
+          className="bg-white text-slate-900 dark:bg-slate-900 dark:text-slate-100"
+        >
+          {opt}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export function SecretRevealControl({
   resource,
   id,
@@ -151,7 +187,22 @@ export function SecretRevealControl({
 
   const handleCopy = async () => {
     if (!revealed) return;
-    await navigator.clipboard.writeText(revealed);
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(revealed);
+      } else {
+        throw new Error('Clipboard API unavailable');
+      }
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = revealed;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };

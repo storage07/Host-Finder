@@ -11,6 +11,7 @@ import {
   logActivity,
   requireAuth,
   signAuthToken,
+  tryResolveAuthUser,
 } from '../middleware/auth.js';
 import {
   decryptField,
@@ -47,10 +48,18 @@ function toAuthUser(u: any): AuthUser {
   };
 }
 
+const COOKIE_BASE_OPTIONS = {
+  httpOnly: true,
+  sameSite: 'lax' as const,
+  secure: process.env.NODE_ENV === 'production',
+  path: '/',
+};
+
 const loginSchema = z.object({
   username: z.string().min(1),
   password: z.string().min(1),
   totpCode: z.string().optional(),
+  rememberMe: z.boolean().optional().default(false),
 });
 
 router.post('/login', loginLimiter, async (req, res) => {
@@ -59,7 +68,7 @@ router.post('/login', loginLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Username and password are required' });
   }
 
-  const { username, password, totpCode } = parsed.data;
+  const { username, password, totpCode, rememberMe } = parsed.data;
   const normalized = username.trim();
   const user =
     (await db.users.findOne({ username: normalized })) ||
@@ -71,6 +80,12 @@ router.post('/login', loginLimiter, async (req, res) => {
 
   if (!user.isActive) {
     return res.status(403).json({ error: 'Account is deactivated. Contact administrator.' });
+  }
+
+  if (user.role !== 'admin') {
+    return res.status(403).json({
+      error: 'Access denied. Only administrator accounts can sign in.',
+    });
   }
 
   if (user.lockUntil && new Date(user.lockUntil).getTime() > Date.now()) {
@@ -123,13 +138,12 @@ router.post('/login', loginLimiter, async (req, res) => {
   });
 
   const authUser = toAuthUser(user);
-  const token = signAuthToken(authUser);
+  const token = signAuthToken(authUser, Boolean(rememberMe));
+  const maxAgeMs = rememberMe ? 7 * 24 * 60 * 60 * 1000 : 12 * 60 * 60 * 1000;
 
   res.cookie('hf_token', token, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: 12 * 60 * 60 * 1000,
+    ...COOKIE_BASE_OPTIONS,
+    maxAge: maxAgeMs,
   });
 
   await logActivity(
@@ -137,16 +151,30 @@ router.post('/login', loginLimiter, async (req, res) => {
     'LOGIN',
     'auth',
     user._id,
-    `User ${user.username} signed in`
+    `User ${user.username} signed in${rememberMe ? ' (extended session)' : ''}`
   );
 
-  return res.json({ user: authUser, token });
+  return res.json({
+    user: authUser,
+    token,
+    expiresIn: rememberMe ? '7d' : '12h',
+  });
 });
 
-router.post('/logout', requireAuth, async (req: AuthedRequest, res) => {
-  await logActivity(req, 'LOGOUT', 'auth', req.user?.id || '', 'User signed out');
-  res.clearCookie('hf_token');
-  return res.json({ success: true });
+router.post('/logout', async (req: AuthedRequest, res) => {
+  const resolvedUser = await tryResolveAuthUser(req);
+  if (resolvedUser) {
+    req.user = resolvedUser;
+    await logActivity(
+      req,
+      'LOGOUT',
+      'auth',
+      resolvedUser.id,
+      `User ${resolvedUser.username} signed out`
+    );
+  }
+  res.clearCookie('hf_token', COOKIE_BASE_OPTIONS);
+  return res.json({ success: true, message: 'Signed out successfully' });
 });
 
 router.get('/me', requireAuth, async (req: AuthedRequest, res) => {
@@ -189,7 +217,18 @@ router.post('/change-password', requireAuth, async (req: AuthedRequest, res) => 
 
   await logActivity(req, 'CHANGE_PASSWORD', 'users', user._id, 'Password updated');
 
-  return res.json({ user: toAuthUser(updated), message: 'Password updated successfully' });
+  const updatedAuthUser = toAuthUser(updated);
+  const freshToken = signAuthToken(updatedAuthUser);
+  res.cookie('hf_token', freshToken, {
+    ...COOKIE_BASE_OPTIONS,
+    maxAge: 12 * 60 * 60 * 1000,
+  });
+
+  return res.json({
+    user: updatedAuthUser,
+    token: freshToken,
+    message: 'Password updated successfully',
+  });
 });
 
 router.post('/forgot-password', async (req, res) => {
@@ -197,10 +236,10 @@ router.post('/forgot-password', async (req, res) => {
   if (!email) return res.status(400).json({ error: 'Email is required' });
 
   const user = await db.users.findOne({ email });
-  if (!user) {
-    // Avoid user enumeration
+  if (!user || user.role !== 'admin') {
+    // Avoid user enumeration and restrict reset codes to administrator accounts
     return res.json({
-      message: 'If an account matches that email, a password reset code has been generated.',
+      message: 'If an administrator account matches that email, a password reset code has been generated.',
     });
   }
 
@@ -219,13 +258,27 @@ router.post('/forgot-password', async (req, res) => {
   });
 });
 
+const resetPasswordSchema = z.object({
+  email: z.string().email('Valid email is required'),
+  resetCode: z.string().min(4, 'Reset code is required'),
+  newPassword: z
+    .string()
+    .min(8, 'New password must be at least 8 characters')
+    .regex(/[A-Z]/, 'Must contain at least one uppercase letter')
+    .regex(/[0-9]/, 'Must contain at least one number')
+    .regex(/[^A-Za-z0-9]/, 'Must contain at least one special character'),
+});
+
 router.post('/reset-password', async (req, res) => {
-  const { email, resetCode, newPassword } = req.body || {};
-  if (!email || !resetCode || !newPassword) {
-    return res.status(400).json({ error: 'Email, reset code, and new password are required' });
+  const parsed = resetPasswordSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: parsed.error.issues[0]?.message || 'Email, reset code, and strong password are required',
+    });
   }
 
-  const user = await db.users.findOne({ email: String(email).trim().toLowerCase() });
+  const { email, resetCode, newPassword } = parsed.data;
+  const user = await db.users.findOne({ email: email.trim().toLowerCase() });
   if (!user || !user.resetTokenHash || !user.resetTokenExpires) {
     return res.status(400).json({ error: 'Invalid or expired reset code' });
   }
@@ -236,14 +289,14 @@ router.post('/reset-password', async (req, res) => {
 
   const incomingHash = crypto
     .createHash('sha256')
-    .update(String(resetCode).trim().toUpperCase())
+    .update(resetCode.trim().toUpperCase())
     .digest('hex');
 
   if (incomingHash !== user.resetTokenHash) {
     return res.status(400).json({ error: 'Invalid reset code' });
   }
 
-  const newHash = await bcrypt.hash(String(newPassword), 12);
+  const newHash = await bcrypt.hash(newPassword, 12);
   await db.users.updateById(user._id, {
     passwordHash: newHash,
     resetTokenHash: '',

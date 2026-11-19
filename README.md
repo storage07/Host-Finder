@@ -43,12 +43,17 @@ Copy `.env.example` to `.env` (or configure AI Studio Secrets):
 PORT=3000
 NODE_ENV=development
 MONGO_URI="mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/host_finder?retryWrites=true&w=majority"
+MONGO_DB_NAME="host_finder"
+MONGO_MIN_POOL_SIZE=2
+MONGO_MAX_POOL_SIZE=10
+MONGO_SERVER_SELECTION_TIMEOUT_MS=8000
+MONGO_SOCKET_TIMEOUT_MS=45000
 JWT_SECRET="replace-with-strong-random-jwt-secret-min-32-chars"
 ENCRYPTION_KEY="replace-with-strong-32-byte-encryption-secret"
 ADMIN_INITIAL_PASSWORD="HostFinder@2026!"
 ```
 
-> **Note:** When `MONGO_URI` is provided, Host Finder connects directly to MongoDB Atlas via Mongoose. If `MONGO_URI` is omitted in local preview, the server automatically uses a schema-compatible local JSON fallback in `.data/host_finder_db.json` so all features work immediately.
+> **Note:** `MONGO_URI` (or `MONGODB_URI`) is required on startup. The database utility (`server/config/database.ts`) validates the URI, manages the Mongoose connection pool (`minPoolSize: 2`, `maxPoolSize: 10`), logs lifecycle events, retries up to 3 times on startup, and exits if Atlas is unreachable.
 
 ---
 

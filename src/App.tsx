@@ -1,13 +1,17 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { onIdTokenChanged, signOut } from 'firebase/auth';
 import {
   Bell,
   Building2,
+  ChevronDown,
   CreditCard,
   FileSpreadsheet,
   FileText,
   Globe,
   HardDrive,
+  KeyRound,
   LayoutDashboard,
+  Loader2,
   LogOut,
   Menu,
   Moon,
@@ -18,12 +22,14 @@ import {
   Users,
   X,
 } from 'lucide-react';
+import { auth } from './lib/firebase.ts';
 import { AuthScreen } from './components/AuthScreen';
 import { CardsAndBankView } from './components/CardsAndBankView';
 import { ClientsView } from './components/ClientsView';
 import { DashboardView } from './components/DashboardView';
 import { DomainsView } from './components/DomainsView';
 import { ExcelManagerView } from './components/ExcelManagerView';
+import { GlobalSearchBar, SearchTargetSection } from './components/GlobalSearchBar';
 import { HostingView } from './components/HostingView';
 import { InvoicesView } from './components/InvoicesView';
 import { NotificationsView } from './components/NotificationsView';
@@ -32,7 +38,7 @@ import { ProvidersView } from './components/ProvidersView';
 import { SettingsView } from './components/SettingsView';
 import { UserManagementView } from './components/UserManagementView';
 import { AppSettings, AuthUser } from './types';
-import { apiFetch, setStoredToken } from './utils/api';
+import { apiFetch, clearAllAuthTokens, setMemoryAuthToken } from './utils/api';
 
 type NavKey =
   | 'dashboard'
@@ -54,7 +60,21 @@ export default function App() {
   const [activeNav, setActiveNav] = useState<NavKey>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [openAddClientFlag, setOpenAddClientFlag] = useState(false);
+  const [searchPrefill, setSearchPrefill] = useState<{
+    section: SearchTargetSection;
+    term: string;
+  } | null>(null);
+  const [statusPrefill, setStatusPrefill] = useState<{
+    section: NavKey;
+    status: string;
+  } | null>(null);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [confirmLogoutOpen, setConfirmLogoutOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [justSignedOut, setJustSignedOut] = useState(false);
+  const loggingOutRef = useRef(false);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
 
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('hf_theme');
@@ -99,6 +119,12 @@ export default function App() {
   const loadSessionContext = async () => {
     try {
       const me = await apiFetch<{ user: AuthUser }>('/api/auth/me');
+      if (me.user.role !== 'admin') {
+        clearAllAuthTokens();
+        await signOut(auth).catch(() => {});
+        setUser(null);
+        return;
+      }
       setUser(me.user);
       const [sRes, nRes] = await Promise.all([
         apiFetch<{ settings: AppSettings }>('/api/settings'),
@@ -107,6 +133,7 @@ export default function App() {
       if (sRes.settings) setSettings(sRes.settings);
       setUnreadNotifications(nRes.items.filter((i) => !i.isRead).length);
     } catch {
+      clearAllAuthTokens();
       setUser(null);
     } finally {
       setAuthChecked(true);
@@ -114,12 +141,51 @@ export default function App() {
   };
 
   useEffect(() => {
-    loadSessionContext();
+    const handlePointerDown = (e: MouseEvent) => {
+      if (
+        accountMenuRef.current &&
+        !accountMenuRef.current.contains(e.target as Node)
+      ) {
+        setAccountMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setAccountMenuOpen(false);
+        if (!signingOut) setConfirmLogoutOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [signingOut]);
+
+  useEffect(() => {
+    const unsubscribe = onIdTokenChanged(auth, async (fbUser) => {
+      if (loggingOutRef.current) return;
+      if (fbUser) {
+        try {
+          const idToken = await fbUser.getIdToken();
+          setMemoryAuthToken(idToken);
+        } catch {
+          setMemoryAuthToken(null);
+        }
+      } else {
+        setMemoryAuthToken(null);
+      }
+      await loadSessionContext();
+    });
+    return () => unsubscribe();
   }, []);
 
   const handleAuthenticated = async (u: AuthUser) => {
+    setJustSignedOut(false);
     setUser(u);
     if (!u.mustChangePassword) {
+      showToast(`Welcome back, ${u.fullName}`, 'success');
       try {
         const [sRes, nRes] = await Promise.all([
           apiFetch<{ settings: AppSettings }>('/api/settings'),
@@ -134,20 +200,51 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    if (loggingOutRef.current) return;
+    loggingOutRef.current = true;
+    setSigningOut(true);
     try {
-      await apiFetch('/api/auth/logout', { method: 'POST' });
-    } catch {
-      // ignore
+      // 1. Notify backend FIRST while token/cookie is still active so LOGOUT audit entry is recorded and cookie is cleared
+      try {
+        await apiFetch('/api/auth/logout', { method: 'POST' });
+      } catch {
+        // continue client cleanup even if network call fails
+      }
+      // 2. Clear all client-side tokens (memory, localStorage, sessionStorage) before Firebase signOut
+      clearAllAuthTokens();
+      // 3. Sign out of Firebase Auth (guarded by loggingOutRef so onIdTokenChanged does not re-fetch /api/auth/me)
+      try {
+        await signOut(auth);
+      } catch {
+        // ignore if not signed in with Firebase
+      }
+      // 4. Reset application session state cleanly
+      setUser(null);
+      setActiveNav('dashboard');
+      setSearchPrefill(null);
+      setStatusPrefill(null);
+      setUnreadNotifications(0);
+      setMobileMenuOpen(false);
+      setAccountMenuOpen(false);
+      setConfirmLogoutOpen(false);
+      setJustSignedOut(true);
+      showToast('You have been signed out', 'success');
+    } finally {
+      setSigningOut(false);
+      loggingOutRef.current = false;
     }
-    setStoredToken(null);
-    setUser(null);
-    setActiveNav('dashboard');
   };
 
   if (!authChecked) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50 text-xs text-slate-500 dark:bg-slate-950 dark:text-slate-400">
-        Loading Host Finder...
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-slate-50 text-xs text-slate-500 dark:bg-slate-950 dark:text-slate-400">
+        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white">
+          <Server className="h-5 w-5" />
+        </div>
+        <div className="flex items-center gap-2">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />
+          <span>Restoring Host Finder session...</span>
+        </div>
       </div>
     );
   }
@@ -158,8 +255,11 @@ export default function App() {
         <AuthScreen
           user={user}
           theme={theme}
+          justSignedOut={justSignedOut}
+          onDismissSignedOut={() => setJustSignedOut(false)}
           onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
           onAuthenticated={handleAuthenticated}
+          onLogout={handleLogout}
           onToast={showToast}
         />
         {toast && <ToastBanner toast={toast} onClose={() => setToast(null)} />}
@@ -274,13 +374,34 @@ export default function App() {
         </nav>
 
         <div className="border-t border-slate-200 p-3 dark:border-slate-800">
+          <div className="mb-2 flex items-center gap-2.5 rounded-lg px-2 py-1.5">
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-[11px] font-semibold text-white dark:bg-slate-100 dark:text-slate-900">
+              {user.fullName.slice(0, 2).toUpperCase()}
+            </div>
+            <div className="min-w-0 flex-1 leading-tight">
+              <p className="truncate text-xs font-medium text-slate-900 dark:text-slate-100">
+                {user.fullName}
+              </p>
+              <p className="truncate text-[11px] text-slate-500 dark:text-slate-400">
+                {user.email}
+              </p>
+            </div>
+          </div>
           <button
             type="button"
-            onClick={handleLogout}
-            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium text-rose-600 transition-colors hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30 whitespace-nowrap"
+            onClick={() => {
+              setMobileMenuOpen(false);
+              setConfirmLogoutOpen(true);
+            }}
+            disabled={signingOut}
+            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium text-rose-600 transition-colors hover:bg-rose-50 disabled:opacity-60 dark:text-rose-400 dark:hover:bg-rose-950/30 whitespace-nowrap"
           >
-            <LogOut className="h-4 w-4 shrink-0" />
-            <span>Logout</span>
+            {signingOut ? (
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+            ) : (
+              <LogOut className="h-4 w-4 shrink-0" />
+            )}
+            <span>{signingOut ? 'Signing out...' : 'Sign Out'}</span>
           </button>
         </div>
       </aside>
@@ -302,6 +423,13 @@ export default function App() {
             </h1>
           </div>
 
+          <GlobalSearchBar
+            onSelectResult={(section, term) => {
+              setSearchPrefill({ section, term });
+              selectNav(section);
+            }}
+          />
+
           <div className="flex items-center gap-3 shrink-0">
             <button
               type="button"
@@ -315,18 +443,110 @@ export default function App() {
                 <Moon className="h-4 w-4" />
               )}
             </button>
-            <div className="hidden sm:flex items-center gap-2.5 border-l border-slate-200 pl-3 dark:border-slate-800">
-              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900 text-xs font-semibold text-white dark:bg-slate-100 dark:text-slate-900">
-                {user.fullName.slice(0, 2).toUpperCase()}
-              </div>
-              <div className="text-right text-xs leading-tight">
-                <p className="font-medium text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                  {user.fullName}
-                </p>
-                <p className="font-mono text-[11px] uppercase text-slate-500 dark:text-slate-400">
-                  {user.role}
-                </p>
-              </div>
+            <div
+              ref={accountMenuRef}
+              className="relative border-l border-slate-200 pl-3 dark:border-slate-800"
+            >
+              <button
+                type="button"
+                onClick={() => setAccountMenuOpen((o) => !o)}
+                aria-expanded={accountMenuOpen}
+                aria-haspopup="menu"
+                className="flex items-center gap-2.5 rounded-lg px-2 py-1 text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-xs font-semibold text-white dark:bg-slate-100 dark:text-slate-900">
+                  {user.fullName.slice(0, 2).toUpperCase()}
+                </div>
+                <div className="hidden text-left text-xs leading-tight sm:block">
+                  <p className="font-medium text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                    {user.fullName}
+                  </p>
+                  <p className="font-mono text-[11px] uppercase text-slate-500 dark:text-slate-400">
+                    {user.role}
+                  </p>
+                </div>
+                <ChevronDown
+                  className={`hidden h-3.5 w-3.5 text-slate-400 transition-transform sm:block ${
+                    accountMenuOpen ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
+
+              {accountMenuOpen && (
+                <div
+                  role="menu"
+                  className="absolute right-0 top-full z-40 mt-2 w-64 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg dark:border-slate-800 dark:bg-slate-900"
+                >
+                  <div className="border-b border-slate-100 px-3 py-2.5 dark:border-slate-800">
+                    <p className="truncate text-xs font-semibold text-slate-900 dark:text-slate-100">
+                      {user.fullName}
+                    </p>
+                    <p className="mt-0.5 truncate text-[11px] text-slate-500 dark:text-slate-400">
+                      {user.email}
+                    </p>
+                    <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                      <span className="font-mono uppercase">{user.role}</span>
+                      <span
+                        className={
+                          user.twoFactorEnabled
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : 'text-slate-400'
+                        }
+                      >
+                        {user.twoFactorEnabled ? '2FA Enabled' : '2FA Off'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="py-1">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setAccountMenuOpen(false);
+                        selectNav('settings');
+                      }}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"
+                    >
+                      <KeyRound className="h-3.5 w-3.5 text-slate-400" />
+                      <span>Account &amp; Security</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setTheme(theme === 'dark' ? 'light' : 'dark');
+                        setAccountMenuOpen(false);
+                      }}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"
+                    >
+                      {theme === 'dark' ? (
+                        <Sun className="h-3.5 w-3.5 text-slate-400" />
+                      ) : (
+                        <Moon className="h-3.5 w-3.5 text-slate-400" />
+                      )}
+                      <span>
+                        Switch to {theme === 'dark' ? 'Light' : 'Dark'} Mode
+                      </span>
+                    </button>
+                  </div>
+
+                  <div className="border-t border-slate-100 pt-1 dark:border-slate-800">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setAccountMenuOpen(false);
+                        setConfirmLogoutOpen(true);
+                      }}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium text-rose-600 transition-colors hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
+                    >
+                      <LogOut className="h-3.5 w-3.5" />
+                      <span>Sign Out</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </header>
@@ -337,19 +557,38 @@ export default function App() {
               <DashboardView
                 currency={settings.defaultCurrency}
                 isAdmin={isAdmin}
-                onNavigate={(t) => selectNav(t as NavKey)}
+                canExportExcel={user.role !== 'viewer'}
+                onNavigate={(t, statusFilter) => {
+                  const target = t as NavKey;
+                  if (statusFilter) {
+                    setStatusPrefill({ section: target, status: statusFilter });
+                  } else {
+                    setStatusPrefill(null);
+                  }
+                  selectNav(target);
+                }}
                 onOpenAddClient={() => {
                   setOpenAddClientFlag(true);
                   selectNav('clients');
                 }}
+                onToast={showToast}
               />
             )}
             {activeNav === 'clients' && (
               <ClientsView
                 currency={settings.defaultCurrency}
                 isAdmin={isAdmin}
+                canExportExcel={user.role !== 'viewer'}
                 initialAddOpen={openAddClientFlag}
                 onClearInitialAdd={() => setOpenAddClientFlag(false)}
+                initialSearch={
+                  searchPrefill?.section === 'clients' ? searchPrefill.term : undefined
+                }
+                onClearInitialSearch={() => setSearchPrefill(null)}
+                initialStatus={
+                  statusPrefill?.section === 'clients' ? statusPrefill.status : undefined
+                }
+                onClearInitialStatus={() => setStatusPrefill(null)}
                 onNavigateExcel={() => selectNav('excel')}
                 onToast={showToast}
               />
@@ -358,6 +597,14 @@ export default function App() {
               <HostingView
                 user={user}
                 currency={settings.defaultCurrency}
+                initialSearch={
+                  searchPrefill?.section === 'hosting' ? searchPrefill.term : undefined
+                }
+                onClearInitialSearch={() => setSearchPrefill(null)}
+                initialStatus={
+                  statusPrefill?.section === 'hosting' ? statusPrefill.status : undefined
+                }
+                onClearInitialStatus={() => setStatusPrefill(null)}
                 onToast={showToast}
               />
             )}
@@ -365,6 +612,14 @@ export default function App() {
               <DomainsView
                 user={user}
                 currency={settings.defaultCurrency}
+                initialSearch={
+                  searchPrefill?.section === 'domains' ? searchPrefill.term : undefined
+                }
+                onClearInitialSearch={() => setSearchPrefill(null)}
+                initialStatus={
+                  statusPrefill?.section === 'domains' ? statusPrefill.status : undefined
+                }
+                onClearInitialStatus={() => setStatusPrefill(null)}
                 onToast={showToast}
               />
             )}
@@ -383,6 +638,10 @@ export default function App() {
                 defaultCurrency={settings.defaultCurrency}
                 defaultTaxRate={settings.defaultTaxRate}
                 defaultTaxMode={settings.defaultTaxMode}
+                initialStatus={
+                  statusPrefill?.section === 'invoices' ? statusPrefill.status : undefined
+                }
+                onClearInitialStatus={() => setStatusPrefill(null)}
                 onToast={showToast}
               />
             )}
@@ -410,6 +669,67 @@ export default function App() {
           </div>
         </main>
       </div>
+
+      {confirmLogoutOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-[1px]"
+          onClick={() => {
+            if (!signingOut) setConfirmLogoutOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-rose-50 text-rose-600 dark:bg-rose-950/50 dark:text-rose-400">
+                <LogOut className="h-4 w-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  Sign out of Host Finder?
+                </h2>
+                <p className="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                  Signed in as{' '}
+                  <span className="font-medium text-slate-700 dark:text-slate-300">
+                    {user.fullName}
+                  </span>{' '}
+                  ({user.email}). Your active session token and cookie will be cleared.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                disabled={signingOut}
+                onClick={() => setConfirmLogoutOpen(false)}
+                className="rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-60 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={signingOut}
+                onClick={handleLogout}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-rose-700 disabled:opacity-60 whitespace-nowrap shrink-0"
+              >
+                {signingOut ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>Signing out...</span>
+                  </>
+                ) : (
+                  <>
+                    <LogOut className="h-3.5 w-3.5" />
+                    <span>Sign Out</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {toast && <ToastBanner toast={toast} onClose={() => setToast(null)} />}
     </div>

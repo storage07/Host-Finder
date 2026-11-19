@@ -16,8 +16,8 @@
       "isActive": true,
       "_id": "07540f4d80ca698a25db4eb0",
       "createdAt": "2026-11-17T16:57:15.633Z",
-      "updatedAt": "2026-11-17T16:57:45.862Z",
-      "lastLoginAt": "2026-11-17T16:57:45.862Z"
+      "updatedAt": "2026-11-17T17:43:34.616Z",
+      "lastLoginAt": "2026-11-17T17:43:34.616Z"
     },
     {
       "username": "staff_ops",
@@ -37,7 +37,9 @@
       "isActive": true,
       "_id": "28a185568aa51e63315a3770",
       "createdAt": "2026-11-17T16:57:15.828Z",
-      "updatedAt": "2026-11-17T16:57:15.828Z"
+      "updatedAt": "2026-11-17T17:43:35.146Z",
+      "lockUntil": null,
+      "lastLoginAt": "2026-11-17T17:43:35.146Z"
     },
     {
       "username": "audit_viewer",
@@ -981,6 +983,19 @@
       "_id": "40d29329d9b33f6072bd6e81",
       "createdAt": "2026-11-17T16:57:45.944Z",
       "updatedAt": "2026-11-17T16:57:45.944Z"
+    },
+    {
+      "userId": "07540f4d80ca698a25db4eb0",
+      "username": "admin",
+      "role": "admin",
+      "action": "EXPORT_SOURCE_ZIP",
+      "resource": "system",
+      "resourceId": "",
+      "details": "Exported project source ZIP (41 files)",
+      "ipAddress": "127.0.0.1",
+      "_id": "a66965f41bd5357a285f3701",
+      "createdAt": "2026-11-17T17:43:35.039Z",
+      "updatedAt": "2026-11-17T17:43:35.039Z"
     }
   ],
   "settings": [

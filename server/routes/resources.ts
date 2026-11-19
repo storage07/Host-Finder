@@ -7,7 +7,7 @@ import {
   requireAuth,
   requireRole,
 } from '../middleware/auth.js';
-import { computeServiceStatus, daysUntil } from '../services/statusAndCron.js';
+import { daysUntil, resolveServiceStatus } from '../services/statusAndCron.js';
 import { decryptField, encryptField, maskSecret } from '../utils/crypto.js';
 
 const router = Router();
@@ -158,7 +158,10 @@ router.post('/clients', requireAuth, requireRole('admin'), async (req: AuthedReq
     return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid client payload' });
   }
   const clientId = await generateNextClientId();
-  const status = computeServiceStatus(parsed.data.endDate, parsed.data.accountStatus);
+  const status = resolveServiceStatus({
+    expiryDate: parsed.data.endDate,
+    requestedStatus: parsed.data.accountStatus,
+  });
   const created = await db.clients.create({
     ...parsed.data,
     clientId,
@@ -177,12 +180,58 @@ router.put('/clients/:id', requireAuth, requireRole('admin'), async (req: Authed
   if (!existing) return res.status(404).json({ error: 'Client not found' });
 
   const endDate = parsed.data.endDate || existing.endDate;
-  const status = computeServiceStatus(endDate, parsed.data.accountStatus || existing.accountStatus);
+  const dateChanged = Boolean(
+    parsed.data.endDate &&
+      String(parsed.data.endDate).slice(0, 10) !== String(existing.endDate || '').slice(0, 10)
+  );
+  const status = resolveServiceStatus({
+    expiryDate: endDate,
+    requestedStatus: parsed.data.accountStatus,
+    existingStatus: existing.accountStatus,
+    dateChanged,
+  });
   const updated = await db.clients.updateById(req.params.id, {
     ...parsed.data,
     accountStatus: status,
   });
   await logActivity(req, 'UPDATE_CLIENT', 'clients', req.params.id, `Updated client ${existing.clientId}`);
+  return res.json({ item: updated });
+});
+
+router.patch('/clients/:id/status', requireAuth, requireRole('admin'), async (req: AuthedRequest, res) => {
+  const existing = await db.clients.findById(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Client not found' });
+
+  const schema = z.object({
+    accountStatus: z
+      .enum(['Active', 'Upcoming Expiry', 'Expired', 'Renewed', 'Cancelled'])
+      .optional(),
+    paymentStatus: z.enum(['Paid', 'Pending', 'Overdue', 'Partial']).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success || (!parsed.data.accountStatus && !parsed.data.paymentStatus)) {
+    return res.status(400).json({ error: 'Provide a valid accountStatus or paymentStatus' });
+  }
+
+  const updates: Record<string, any> = {};
+  const changes: string[] = [];
+  if (parsed.data.accountStatus) {
+    updates.accountStatus = parsed.data.accountStatus;
+    changes.push(`account=${parsed.data.accountStatus}`);
+  }
+  if (parsed.data.paymentStatus) {
+    updates.paymentStatus = parsed.data.paymentStatus;
+    changes.push(`payment=${parsed.data.paymentStatus}`);
+  }
+
+  const updated = await db.clients.updateById(req.params.id, updates);
+  await logActivity(
+    req,
+    'UPDATE_CLIENT_STATUS',
+    'clients',
+    req.params.id,
+    `Updated ${existing.clientId} status (${changes.join(', ')})`
+  );
   return res.json({ item: updated });
 });
 
@@ -242,7 +291,10 @@ router.post('/hosting', requireAuth, requireRole('admin'), async (req: AuthedReq
     return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid hosting record' });
   }
   const client = await db.clients.findOne({ clientId: parsed.data.clientId });
-  const status = computeServiceStatus(parsed.data.expiryDate, parsed.data.accountStatus);
+  const status = resolveServiceStatus({
+    expiryDate: parsed.data.expiryDate,
+    requestedStatus: parsed.data.accountStatus,
+  });
   const { password, ...rest } = parsed.data;
   const created = await db.hosting_services.create({
     ...rest,
@@ -274,10 +326,40 @@ router.put('/hosting/:id', requireAuth, async (req: AuthedRequest, res) => {
     updates.clientName = client?.clientName || existing.clientName;
   }
   const exp = rest.expiryDate || existing.expiryDate;
-  updates.accountStatus = computeServiceStatus(exp, rest.accountStatus || existing.accountStatus);
+  const dateChanged = Boolean(
+    rest.expiryDate &&
+      String(rest.expiryDate).slice(0, 10) !== String(existing.expiryDate || '').slice(0, 10)
+  );
+  updates.accountStatus = resolveServiceStatus({
+    expiryDate: exp,
+    requestedStatus: rest.accountStatus,
+    existingStatus: existing.accountStatus,
+    dateChanged,
+  });
 
   const updated = await db.hosting_services.updateById(req.params.id, updates);
   await logActivity(req, 'UPDATE_HOSTING', 'hosting_services', req.params.id, `Updated hosting for ${existing.domainName}`);
+  return res.json({ item: sanitizeHostingForClient(updated, req.user!.role) });
+});
+
+router.patch('/hosting/:id/status', requireAuth, async (req: AuthedRequest, res) => {
+  const existing = await db.hosting_services.findById(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Hosting service not found' });
+  if (!canEditService(req.user, existing.clientId)) {
+    return res.status(403).json({ error: 'Insufficient permissions to update this hosting status' });
+  }
+  const status = req.body?.accountStatus;
+  if (!['Active', 'Upcoming Expiry', 'Expired', 'Renewed', 'Cancelled'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid hosting status' });
+  }
+  const updated = await db.hosting_services.updateById(req.params.id, { accountStatus: status });
+  await logActivity(
+    req,
+    'UPDATE_HOSTING_STATUS',
+    'hosting_services',
+    req.params.id,
+    `Marked hosting ${existing.domainName} as ${status}`
+  );
   return res.json({ item: sanitizeHostingForClient(updated, req.user!.role) });
 });
 
@@ -333,7 +415,10 @@ router.post('/domains', requireAuth, requireRole('admin'), async (req: AuthedReq
     return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid domain record' });
   }
   const client = await db.clients.findOne({ clientId: parsed.data.clientId });
-  const status = computeServiceStatus(parsed.data.expiryDate, parsed.data.accountStatus);
+  const status = resolveServiceStatus({
+    expiryDate: parsed.data.expiryDate,
+    requestedStatus: parsed.data.accountStatus,
+  });
   const nsArray = Array.isArray(parsed.data.nameservers)
     ? parsed.data.nameservers
     : parsed.data.nameservers
@@ -377,10 +462,40 @@ router.put('/domains/:id', requireAuth, async (req: AuthedRequest, res) => {
     updates.clientName = client?.clientName || existing.clientName;
   }
   const exp = rest.expiryDate || existing.expiryDate;
-  updates.accountStatus = computeServiceStatus(exp, rest.accountStatus || existing.accountStatus);
+  const dateChanged = Boolean(
+    rest.expiryDate &&
+      String(rest.expiryDate).slice(0, 10) !== String(existing.expiryDate || '').slice(0, 10)
+  );
+  updates.accountStatus = resolveServiceStatus({
+    expiryDate: exp,
+    requestedStatus: rest.accountStatus,
+    existingStatus: existing.accountStatus,
+    dateChanged,
+  });
 
   const updated = await db.domains.updateById(req.params.id, updates);
   await logActivity(req, 'UPDATE_DOMAIN', 'domains', req.params.id, `Updated domain ${existing.domainName}`);
+  return res.json({ item: sanitizeDomainForClient(updated, req.user!.role) });
+});
+
+router.patch('/domains/:id/status', requireAuth, async (req: AuthedRequest, res) => {
+  const existing = await db.domains.findById(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Domain not found' });
+  if (!canEditService(req.user, existing.clientId)) {
+    return res.status(403).json({ error: 'Insufficient permissions to update this domain status' });
+  }
+  const status = req.body?.accountStatus;
+  if (!['Active', 'Upcoming Expiry', 'Expired', 'Renewed', 'Cancelled'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid domain status' });
+  }
+  const updated = await db.domains.updateById(req.params.id, { accountStatus: status });
+  await logActivity(
+    req,
+    'UPDATE_DOMAIN_STATUS',
+    'domains',
+    req.params.id,
+    `Marked domain ${existing.domainName} as ${status}`
+  );
   return res.json({ item: sanitizeDomainForClient(updated, req.user!.role) });
 });
 
@@ -523,6 +638,100 @@ router.post('/secrets/reveal', requireAuth, requireRole('admin'), async (req: Au
   );
 
   return res.json({ value: secretValue });
+});
+
+// --- GLOBAL SEARCH (CLIENTS, HOSTING, DOMAINS) ---
+router.get('/search', requireAuth, async (req: AuthedRequest, res) => {
+  const rawQuery = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (!rawQuery) {
+    return res.json({ query: '', clients: [], hosting: [], domains: [] });
+  }
+
+  const q = rawQuery.toLowerCase();
+  const matches = (...fields: Array<unknown>) =>
+    fields.some((f) =>
+      Array.isArray(f)
+        ? f.some((item) => String(item || '').toLowerCase().includes(q))
+        : String(f || '').toLowerCase().includes(q)
+    );
+
+  const [clientsAll, hostingAll, domainsAll] = await Promise.all([
+    db.clients.find(),
+    db.hosting_services.find(),
+    db.domains.find(),
+  ]);
+
+  const clients = scopeByUser(clientsAll, req.user)
+    .filter((c) =>
+      matches(
+        c._id,
+        c.clientId,
+        c.clientName,
+        c.companyName,
+        c.email,
+        c.mobile,
+        c.serviceProvider,
+        c.serviceType
+      )
+    )
+    .slice(0, 6)
+    .map((c) => ({
+      _id: c._id,
+      clientId: c.clientId,
+      clientName: c.clientName,
+      companyName: c.companyName,
+      email: c.email,
+      accountStatus: c.accountStatus,
+    }));
+
+  const hosting = scopeByUser(hostingAll, req.user)
+    .filter((h) =>
+      matches(
+        h._id,
+        h.clientId,
+        h.clientName,
+        h.domainName,
+        h.hostingProvider,
+        h.hostingPlan,
+        h.serverName,
+        h.serverIp
+      )
+    )
+    .slice(0, 6)
+    .map((h) => ({
+      _id: h._id,
+      clientId: h.clientId,
+      clientName: h.clientName,
+      domainName: h.domainName,
+      hostingProvider: h.hostingProvider,
+      hostingPlan: h.hostingPlan,
+      serverName: h.serverName,
+      serverIp: h.serverIp,
+      accountStatus: h.accountStatus,
+    }));
+
+  const domains = scopeByUser(domainsAll, req.user)
+    .filter((d) =>
+      matches(
+        d._id,
+        d.clientId,
+        d.clientName,
+        d.domainName,
+        d.domainRegistrar,
+        d.nameservers
+      )
+    )
+    .slice(0, 6)
+    .map((d) => ({
+      _id: d._id,
+      clientId: d.clientId,
+      clientName: d.clientName,
+      domainName: d.domainName,
+      domainRegistrar: d.domainRegistrar,
+      accountStatus: d.accountStatus,
+    }));
+
+  return res.json({ query: rawQuery, clients, hosting, domains });
 });
 
 export default router;

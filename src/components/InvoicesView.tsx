@@ -1,10 +1,17 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Download, Plus, Search, Trash2 } from 'lucide-react';
 import { AuthUser, Client, Invoice, PaymentRecord } from '../types';
-import { apiFetch, formatDate, formatMoney, toInputDate } from '../utils/api';
+import {
+  apiFetch,
+  downloadAuthenticatedFile,
+  formatDate,
+  formatMoney,
+  toInputDate,
+} from '../utils/api';
 import {
   ConfirmDialog,
   EmptyState,
+  InlineStatusSelect,
   inputCls,
   labelCls,
   Modal,
@@ -12,17 +19,23 @@ import {
   TableSkeleton,
 } from './UI';
 
+const INVOICE_STATUS_OPTIONS: readonly Invoice['status'][] = ['Paid', 'Pending', 'Overdue'];
+
 export function InvoicesView({
   user,
   defaultCurrency,
   defaultTaxRate,
   defaultTaxMode,
+  initialStatus,
+  onClearInitialStatus,
   onToast,
 }: {
   user: AuthUser;
   defaultCurrency: string;
   defaultTaxRate: number;
   defaultTaxMode: 'with_tax' | 'without_tax';
+  initialStatus?: string;
+  onClearInitialStatus?: () => void;
   onToast: (msg: string, type?: 'success' | 'error') => void;
 }) {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -36,6 +49,9 @@ export function InvoicesView({
   const [modalOpen, setModalOpen] = useState(false);
   const [deleting, setDeleting] = useState<Invoice | null>(null);
   const [busy, setBusy] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [downloadingPdfId, setDownloadingPdfId] = useState<string | null>(null);
+  const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null);
 
   // Invoice Builder State
   const [clientId, setClientId] = useState('');
@@ -73,6 +89,14 @@ export function InvoicesView({
   useEffect(() => {
     loadAll();
   }, []);
+
+  useEffect(() => {
+    if (initialStatus) {
+      setTab('invoices');
+      setStatusFilter(initialStatus);
+      onClearInitialStatus?.();
+    }
+  }, [initialStatus]);
 
   const calcSubtotal = useMemo(
     () =>
@@ -145,6 +169,7 @@ export function InvoicesView({
   };
 
   const updateInvoiceStatus = async (inv: Invoice, nextStatus: Invoice['status']) => {
+    setUpdatingStatusId(inv._id);
     try {
       await apiFetch(`/api/invoices/${inv._id}/status`, {
         method: 'PATCH',
@@ -154,6 +179,40 @@ export function InvoicesView({
       await loadAll();
     } catch (err) {
       onToast((err as Error).message, 'error');
+    } finally {
+      setUpdatingStatusId(null);
+    }
+  };
+
+  const handleExportExcel = async () => {
+    setExportingExcel(true);
+    try {
+      const params = new URLSearchParams({ type: 'payments' });
+      if (statusFilter !== 'All') params.set('status', statusFilter);
+      const filename = await downloadAuthenticatedFile(
+        `/api/excel/export?${params.toString()}`,
+        'host_finder_payments.xlsx'
+      );
+      onToast(`Downloaded ${filename}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
+  const handleDownloadPdf = async (inv: Invoice) => {
+    setDownloadingPdfId(inv._id);
+    try {
+      const filename = await downloadAuthenticatedFile(
+        `/api/invoices/${inv._id}/pdf`,
+        `${inv.invoiceNumber}.pdf`
+      );
+      onToast(`Downloaded ${filename}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setDownloadingPdfId(null);
     }
   };
 
@@ -229,13 +288,15 @@ export function InvoicesView({
 
         <div className="flex items-center gap-2">
           {user.role !== 'viewer' && (
-            <a
-              href="/api/excel/export?type=payments"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              disabled={exportingExcel}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
             >
               <Download className="h-3.5 w-3.5" />
-              Export Excel
-            </a>
+              {exportingExcel ? 'Exporting...' : 'Export Excel'}
+            </button>
           )}
           {isAdmin && (
             <button
@@ -308,30 +369,28 @@ export function InvoicesView({
                       </td>
                       <td className="px-4 py-3">
                         {isAdmin ? (
-                          <select
+                          <InlineStatusSelect
+                            ariaLabel={`Status for ${inv.invoiceNumber}`}
                             value={inv.status}
-                            onChange={(e) =>
-                              updateInvoiceStatus(inv, e.target.value as Invoice['status'])
-                            }
-                            className="rounded border border-slate-200 bg-transparent px-2 py-1 text-xs font-medium dark:border-slate-700"
-                          >
-                            <option value="Paid">Paid</option>
-                            <option value="Pending">Pending</option>
-                            <option value="Overdue">Overdue</option>
-                          </select>
+                            options={INVOICE_STATUS_OPTIONS}
+                            disabled={updatingStatusId === inv._id}
+                            onChange={(next) => updateInvoiceStatus(inv, next)}
+                          />
                         ) : (
                           <StatusLabel status={inv.status} />
                         )}
                       </td>
                       <td className="px-5 py-3 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
-                          <a
-                            href={`/api/invoices/${inv._id}/pdf`}
-                            className="inline-flex items-center gap-1 rounded border border-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadPdf(inv)}
+                            disabled={downloadingPdfId === inv._id}
+                            className="inline-flex items-center gap-1 rounded border border-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                           >
                             <Download className="h-3 w-3" />
-                            PDF
-                          </a>
+                            {downloadingPdfId === inv._id ? '...' : 'PDF'}
+                          </button>
                           {isAdmin && (
                             <button
                               type="button"

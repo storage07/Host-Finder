@@ -18,6 +18,9 @@ export function NotificationsView({
   const [filter, setFilter] = useState<'all' | 'unread'>('all');
   const [scanning, setScanning] = useState(false);
 
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [markingAll, setMarkingAll] = useState(false);
+
   const loadNotifications = async () => {
     setLoading(true);
     try {
@@ -36,14 +39,29 @@ export function NotificationsView({
   }, []);
 
   const markRead = async (id: string) => {
-    await apiFetch(`/api/notifications/${id}/read`, { method: 'PATCH' });
-    await loadNotifications();
+    setBusyId(id);
+    try {
+      await apiFetch(`/api/notifications/${id}/read`, { method: 'PATCH' });
+      onToast('Notification marked as read', 'success');
+      await loadNotifications();
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setBusyId(null);
+    }
   };
 
   const markAllRead = async () => {
-    await apiFetch('/api/notifications/read-all', { method: 'POST' });
-    onToast('All notifications marked as read', 'success');
-    await loadNotifications();
+    setMarkingAll(true);
+    try {
+      await apiFetch('/api/notifications/read-all', { method: 'POST' });
+      onToast('All notifications marked as read', 'success');
+      await loadNotifications();
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setMarkingAll(false);
+    }
   };
 
   const runScan = async () => {
@@ -100,10 +118,11 @@ export function NotificationsView({
           <button
             type="button"
             onClick={markAllRead}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+            disabled={markingAll || items.every((i) => i.isRead)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
           >
             <CheckCheck className="h-3.5 w-3.5" />
-            Mark All Read
+            {markingAll ? 'Updating...' : 'Mark All Read'}
           </button>
           {canScan && (
             <button
@@ -168,10 +187,11 @@ export function NotificationsView({
               {!n.isRead && (
                 <button
                   type="button"
+                  disabled={busyId === n._id}
                   onClick={() => markRead(n._id)}
-                  className="rounded-lg border border-slate-200 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+                  className="rounded-lg border border-slate-200 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
                 >
-                  Mark Read
+                  {busyId === n._id ? 'Saving...' : 'Mark Read'}
                 </button>
               )}
             </div>

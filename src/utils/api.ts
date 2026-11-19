@@ -1,15 +1,38 @@
 const TOKEN_KEY = 'hf_auth_token';
+let memoryAuthToken: string | null = null;
 
-export function getStoredToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+export function setMemoryAuthToken(token: string | null) {
+  memoryAuthToken = token;
 }
 
-export function setStoredToken(token: string | null) {
+export function getMemoryAuthToken(): string | null {
+  return memoryAuthToken;
+}
+
+export function getStoredToken(): string | null {
+  return (
+    memoryAuthToken ||
+    localStorage.getItem(TOKEN_KEY) ||
+    sessionStorage.getItem(TOKEN_KEY)
+  );
+}
+
+export function setStoredToken(token: string | null, remember = true) {
+  localStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
   if (token) {
-    localStorage.setItem(TOKEN_KEY, token);
-  } else {
-    localStorage.removeItem(TOKEN_KEY);
+    if (remember) {
+      localStorage.setItem(TOKEN_KEY, token);
+    } else {
+      sessionStorage.setItem(TOKEN_KEY, token);
+    }
   }
+}
+
+export function clearAllAuthTokens() {
+  memoryAuthToken = null;
+  localStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
 }
 
 export async function apiFetch<T = any>(
@@ -47,6 +70,52 @@ export async function apiFetch<T = any>(
   }
 
   return res.json() as Promise<T>;
+}
+
+export async function downloadAuthenticatedFile(
+  url: string,
+  fallbackFilename: string
+): Promise<string> {
+  const token = getStoredToken();
+  const headers = new Headers();
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers,
+    credentials: 'include',
+  });
+
+  if (!res.ok) {
+    let message = `Download failed (${res.status})`;
+    try {
+      const data = await res.json();
+      if (data?.error) message = data.error;
+    } catch {
+      // ignore parse error
+    }
+    throw new Error(message);
+  }
+
+  let filename = fallbackFilename;
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";\n]+)"?/i);
+  if (match && match[1]) {
+    filename = decodeURIComponent(match[1].trim());
+  }
+
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  return filename;
 }
 
 export function formatMoney(amount: number | undefined, currency = 'INR'): string {

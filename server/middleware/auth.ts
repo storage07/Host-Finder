@@ -1,11 +1,15 @@
 import { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
+import { isSqlConfigured } from '../../src/db/index.ts';
+import { getOrCreateUser } from '../../src/db/users.ts';
+import { adminAuth } from '../../src/lib/firebase-admin.ts';
 import { env } from '../config/env.js';
 import { db } from '../db/store.js';
 import { sanitizeObject } from '../utils/crypto.js';
 
 export interface AuthUser {
   id: string;
+  uid?: string;
   username: string;
   fullName: string;
   email: string;
@@ -34,7 +38,7 @@ export function sanitizeRequestMiddleware(
   next();
 }
 
-export function signAuthToken(user: AuthUser): string {
+export function signAuthToken(user: AuthUser, rememberMe = false): string {
   return jwt.sign(
     {
       sub: user.id,
@@ -42,8 +46,105 @@ export function signAuthToken(user: AuthUser): string {
       role: user.role,
     },
     env.JWT_SECRET,
-    { expiresIn: '12h' }
+    { expiresIn: rememberMe ? '7d' : '12h' }
   );
+}
+
+async function resolveFirebaseUser(decoded: { uid: string; email?: string; name?: string }) {
+  if (isSqlConfigured()) {
+    const row = await getOrCreateUser(
+      decoded.uid,
+      decoded.email || `${decoded.uid}@firebase.local`,
+      decoded.name || ''
+    );
+    return {
+      ...row,
+      _id: String(row.id),
+    };
+  }
+
+  const normalizedEmail = (decoded.email || `${decoded.uid}@firebase.local`).toLowerCase();
+  let existing =
+    (await db.users.findOne({ uid: decoded.uid })) ||
+    (await db.users.findOne({ email: normalizedEmail }));
+
+  if (!existing) {
+    const allUsers = await db.users.find();
+    const hasGoogleAdmin = allUsers.some(
+      (u) => u.role === 'admin' && u.uid && !String(u.uid).startsWith('local_')
+    );
+    existing = await db.users.create({
+      uid: decoded.uid,
+      username: `${normalizedEmail.split('@')[0]}_${decoded.uid.slice(0, 6)}`,
+      fullName: decoded.name || normalizedEmail.split('@')[0],
+      email: normalizedEmail,
+      passwordHash: '',
+      role: hasGoogleAdmin ? 'viewer' : 'admin',
+      assignedClientIds: [],
+      canUpdateAssignedServices: !hasGoogleAdmin,
+      mustChangePassword: false,
+      failedLoginAttempts: 0,
+      twoFactorEnabled: false,
+      isActive: true,
+      lastLoginAt: new Date().toISOString(),
+    });
+  } else {
+    existing = await db.users.updateById(existing._id, {
+      uid: decoded.uid,
+      lastLoginAt: new Date().toISOString(),
+    });
+  }
+  return existing;
+}
+
+function extractRequestToken(req: Request): string | undefined {
+  const cookieToken = req.cookies?.hf_token;
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ')
+    ? authHeader.slice(7)
+    : undefined;
+  return bearerToken || cookieToken;
+}
+
+export async function tryResolveAuthUser(req: Request): Promise<AuthUser | null> {
+  try {
+    const token = extractRequestToken(req);
+    if (!token) return null;
+
+    let user: any = null;
+    try {
+      const decodedToken = await adminAuth.verifyIdToken(token);
+      user = await resolveFirebaseUser({
+        uid: decodedToken.uid,
+        email: decodedToken.email,
+        name: decodedToken.name,
+      });
+    } catch {
+      try {
+        const payload = jwt.verify(token, env.JWT_SECRET) as { sub: string };
+        user = await db.users.findById(payload.sub);
+      } catch {
+        return null;
+      }
+    }
+
+    if (!user || !user.isActive) return null;
+
+    return {
+      id: String(user._id ?? user.id),
+      uid: user.uid,
+      username: user.username,
+      fullName: user.fullName,
+      email: user.email,
+      role: user.role,
+      assignedClientIds: user.assignedClientIds || [],
+      canUpdateAssignedServices: Boolean(user.canUpdateAssignedServices),
+      mustChangePassword: Boolean(user.mustChangePassword),
+      twoFactorEnabled: Boolean(user.twoFactorEnabled),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function requireAuth(
@@ -52,25 +153,44 @@ export async function requireAuth(
   next: NextFunction
 ) {
   try {
-    const cookieToken = req.cookies?.hf_token;
-    const authHeader = req.headers.authorization;
-    const bearerToken = authHeader?.startsWith('Bearer ')
-      ? authHeader.slice(7)
-      : undefined;
-    const token = cookieToken || bearerToken;
+    const token = extractRequestToken(req);
 
     if (!token) {
-      return res.status(401).json({ error: 'Authentication required' });
+      return res.status(401).json({ error: 'Unauthorized: Missing token' });
     }
 
-    const payload = jwt.verify(token, env.JWT_SECRET) as { sub: string };
-    const user = await db.users.findById(payload.sub);
+    // 1. Verify Firebase ID Token (Primary Cloud SQL + Firebase Auth flow)
+    let user: any = null;
+    try {
+      const decodedToken = await adminAuth.verifyIdToken(token);
+      user = await resolveFirebaseUser({
+        uid: decodedToken.uid,
+        email: decodedToken.email,
+        name: decodedToken.name,
+      });
+    } catch {
+      // 2. Fallback to local HS256 JWT token for local credentials
+      try {
+        const payload = jwt.verify(token, env.JWT_SECRET) as { sub: string };
+        user = await db.users.findById(payload.sub);
+      } catch {
+        return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+      }
+    }
+
     if (!user || !user.isActive) {
       return res.status(401).json({ error: 'Account inactive or not found' });
     }
 
+    if (user.role !== 'admin') {
+      return res.status(403).json({
+        error: 'Access denied. Only administrator accounts can access Host Finder.',
+      });
+    }
+
     req.user = {
-      id: user._id,
+      id: String(user._id ?? user.id),
+      uid: user.uid,
       username: user.username,
       fullName: user.fullName,
       email: user.email,
@@ -81,8 +201,9 @@ export async function requireAuth(
       twoFactorEnabled: Boolean(user.twoFactorEnabled),
     };
     next();
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired session' });
+  } catch (error) {
+    console.error('Error verifying authentication token:', error);
+    return res.status(401).json({ error: 'Unauthorized: Invalid token' });
   }
 }
 

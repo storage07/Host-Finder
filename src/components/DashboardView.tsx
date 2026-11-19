@@ -9,10 +9,21 @@ import {
 import { Client, NotificationItem } from '../types';
 import {
   apiFetch,
+  downloadAuthenticatedFile,
   formatDate,
   formatMoney,
 } from '../utils/api';
-import { StatusLabel, TableSkeleton } from './UI';
+import { InlineStatusSelect, StatusLabel, TableSkeleton } from './UI';
+
+const ACCOUNT_STATUS_OPTIONS = [
+  'Active',
+  'Upcoming Expiry',
+  'Expired',
+  'Renewed',
+  'Cancelled',
+] as const;
+
+const PAYMENT_STATUS_OPTIONS = ['Paid', 'Pending', 'Overdue', 'Partial'] as const;
 
 interface DashboardSummary {
   metrics: {
@@ -33,13 +44,17 @@ interface DashboardSummary {
 export function DashboardView({
   currency,
   isAdmin,
+  canExportExcel = true,
   onNavigate,
   onOpenAddClient,
+  onToast,
 }: {
   currency: string;
   isAdmin: boolean;
-  onNavigate: (tab: string) => void;
+  canExportExcel?: boolean;
+  onNavigate: (tab: string, statusFilter?: string) => void;
   onOpenAddClient: () => void;
+  onToast: (msg: string, type?: 'success' | 'error') => void;
 }) {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [clients, setClients] = useState<Client[]>([]);
@@ -47,9 +62,11 @@ export function DashboardView({
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [expiryTab, setExpiryTab] = useState<'upcoming' | 'expired'>('upcoming');
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [updatingKey, setUpdatingKey] = useState<string | null>(null);
 
-  const loadData = async () => {
-    setLoading(true);
+  const loadData = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const [sumRes, cliRes] = await Promise.all([
         apiFetch<DashboardSummary>('/api/dashboard/summary'),
@@ -57,8 +74,72 @@ export function DashboardView({
       ]);
       setSummary(sumRes);
       setClients(cliRes.items);
+    } catch (err) {
+      onToast((err as Error).message || 'Failed to load dashboard data', 'error');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
+    }
+  };
+
+  const handleExportExcel = async () => {
+    setExportingExcel(true);
+    try {
+      const filename = await downloadAuthenticatedFile(
+        '/api/excel/export?type=clients',
+        'host_finder_clients.xlsx'
+      );
+      onToast(`Downloaded ${filename}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
+  const handleWatchlistStatusChange = async (
+    row: any,
+    nextStatus: (typeof ACCOUNT_STATUS_OPTIONS)[number]
+  ) => {
+    const key = `${row.serviceCategory}-${row._id}`;
+    setUpdatingKey(key);
+    try {
+      const endpoint =
+        row.serviceCategory === 'Hosting'
+          ? `/api/hosting/${row._id}/status`
+          : `/api/domains/${row._id}/status`;
+      await apiFetch(endpoint, {
+        method: 'PATCH',
+        body: JSON.stringify({ accountStatus: nextStatus }),
+      });
+      onToast(`${row.domainName} marked as ${nextStatus}`, 'success');
+      await loadData(true);
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setUpdatingKey(null);
+    }
+  };
+
+  const handleClientStatusChange = async (
+    client: Client,
+    patch: { accountStatus?: Client['accountStatus']; paymentStatus?: Client['paymentStatus'] }
+  ) => {
+    const key = `client-${client._id}-${patch.accountStatus ? 'acc' : 'pay'}`;
+    setUpdatingKey(key);
+    try {
+      await apiFetch(`/api/clients/${client._id}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      });
+      onToast(
+        `${client.clientId} updated to ${patch.accountStatus || patch.paymentStatus}`,
+        'success'
+      );
+      await loadData(true);
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setUpdatingKey(null);
     }
   };
 
@@ -87,15 +168,50 @@ export function DashboardView({
   }
 
   const m = summary.metrics;
-  const kpis = [
+  const kpis: Array<{
+    label: string;
+    value: string;
+    target: string;
+    statusFilter?: string;
+    color?: string;
+  }> = [
     { label: 'Total Clients', value: String(m.totalClients), target: 'clients' },
     { label: 'Total Hosting Services', value: String(m.totalHosting), target: 'hosting' },
     { label: 'Total Domains', value: String(m.totalDomains), target: 'domains' },
-    { label: 'Active Services', value: String(m.activeServices), target: 'hosting', color: 'text-emerald-600 dark:text-emerald-400' },
-    { label: 'Upcoming Expiry', value: String(m.upcomingExpiry), target: 'notifications', color: 'text-amber-600 dark:text-amber-400' },
-    { label: 'Expired Services', value: String(m.expiredServices), target: 'hosting', color: 'text-rose-600 dark:text-rose-400' },
-    { label: 'Total Revenue', value: formatMoney(m.totalRevenue, currency), target: 'invoices' },
-    { label: 'Pending Payments', value: formatMoney(m.pendingPayments, currency), target: 'invoices', color: 'text-amber-600 dark:text-amber-400' },
+    {
+      label: 'Active Services',
+      value: String(m.activeServices),
+      target: 'hosting',
+      statusFilter: 'Active',
+      color: 'text-emerald-600 dark:text-emerald-400',
+    },
+    {
+      label: 'Upcoming Expiry',
+      value: String(m.upcomingExpiry),
+      target: 'hosting',
+      statusFilter: 'Upcoming Expiry',
+      color: 'text-amber-600 dark:text-amber-400',
+    },
+    {
+      label: 'Expired Services',
+      value: String(m.expiredServices),
+      target: 'hosting',
+      statusFilter: 'Expired',
+      color: 'text-rose-600 dark:text-rose-400',
+    },
+    {
+      label: 'Total Revenue',
+      value: formatMoney(m.totalRevenue, currency),
+      target: 'invoices',
+      statusFilter: 'Paid',
+    },
+    {
+      label: 'Pending Payments',
+      value: formatMoney(m.pendingPayments, currency),
+      target: 'invoices',
+      statusFilter: 'Pending',
+      color: 'text-amber-600 dark:text-amber-400',
+    },
   ];
 
   const activeExpiryRows =
@@ -141,13 +257,17 @@ export function DashboardView({
               Import Excel
             </button>
           )}
-          <a
-            href="/api/excel/export?type=clients"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
-          >
-            <Download className="h-3.5 w-3.5" />
-            Export Excel
-          </a>
+          {canExportExcel && (
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              disabled={exportingExcel}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+            >
+              <Download className="h-3.5 w-3.5" />
+              {exportingExcel ? 'Exporting...' : 'Export Excel'}
+            </button>
+          )}
           {isAdmin && (
             <button
               type="button"
@@ -167,7 +287,7 @@ export function DashboardView({
           <button
             key={kpi.label}
             type="button"
-            onClick={() => onNavigate(kpi.target)}
+            onClick={() => onNavigate(kpi.target, kpi.statusFilter)}
             className="rounded-xl border border-slate-200 bg-white p-5 text-left transition-colors hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700"
           >
             <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
@@ -261,7 +381,17 @@ export function DashboardView({
                         {formatMoney(row.amount, currency)}
                       </td>
                       <td className="px-5 py-2.5 text-right">
-                        <StatusLabel status={row.accountStatus} />
+                        {isAdmin ? (
+                          <InlineStatusSelect
+                            ariaLabel={`Status for ${row.domainName}`}
+                            value={row.accountStatus}
+                            options={ACCOUNT_STATUS_OPTIONS}
+                            disabled={updatingKey === `${row.serviceCategory}-${row._id}`}
+                            onChange={(next) => handleWatchlistStatusChange(row, next)}
+                          />
+                        ) : (
+                          <StatusLabel status={row.accountStatus} />
+                        )}
                       </td>
                     </tr>
                   ))
@@ -373,10 +503,34 @@ export function DashboardView({
                     {formatMoney(c.renewalPrice, currency)}
                   </td>
                   <td className="px-4 py-2.5">
-                    <StatusLabel status={c.paymentStatus} />
+                    {isAdmin ? (
+                      <InlineStatusSelect
+                        ariaLabel={`Payment status for ${c.clientId}`}
+                        value={c.paymentStatus}
+                        options={PAYMENT_STATUS_OPTIONS}
+                        disabled={updatingKey === `client-${c._id}-pay`}
+                        onChange={(next) =>
+                          handleClientStatusChange(c, { paymentStatus: next })
+                        }
+                      />
+                    ) : (
+                      <StatusLabel status={c.paymentStatus} />
+                    )}
                   </td>
                   <td className="px-5 py-2.5 text-right">
-                    <StatusLabel status={c.accountStatus} />
+                    {isAdmin ? (
+                      <InlineStatusSelect
+                        ariaLabel={`Account status for ${c.clientId}`}
+                        value={c.accountStatus}
+                        options={ACCOUNT_STATUS_OPTIONS}
+                        disabled={updatingKey === `client-${c._id}-acc`}
+                        onChange={(next) =>
+                          handleClientStatusChange(c, { accountStatus: next })
+                        }
+                      />
+                    ) : (
+                      <StatusLabel status={c.accountStatus} />
+                    )}
                   </td>
                 </tr>
               ))}

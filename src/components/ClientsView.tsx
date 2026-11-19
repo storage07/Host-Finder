@@ -3,22 +3,46 @@ import {
   Download,
   Edit2,
   Eye,
+  FileDown,
   Plus,
   Search,
   Trash2,
   Upload,
 } from 'lucide-react';
 import { Client } from '../types';
-import { apiFetch, formatDate, formatMoney, toInputDate } from '../utils/api';
+import {
+  apiFetch,
+  downloadAuthenticatedFile,
+  formatDate,
+  formatMoney,
+  toInputDate,
+} from '../utils/api';
+import { exportToCsv } from '../utils/csv';
 import {
   ConfirmDialog,
   EmptyState,
+  InlineStatusSelect,
   inputCls,
   labelCls,
   Modal,
   StatusLabel,
   TableSkeleton,
 } from './UI';
+
+const ACCOUNT_STATUS_OPTIONS: readonly Client['accountStatus'][] = [
+  'Active',
+  'Upcoming Expiry',
+  'Expired',
+  'Renewed',
+  'Cancelled',
+];
+
+const PAYMENT_STATUS_OPTIONS: readonly Client['paymentStatus'][] = [
+  'Paid',
+  'Pending',
+  'Overdue',
+  'Partial',
+];
 
 const BLANK_CLIENT = {
   clientName: '',
@@ -40,15 +64,25 @@ const BLANK_CLIENT = {
 export function ClientsView({
   currency,
   isAdmin,
+  canExportExcel = true,
   initialAddOpen,
   onClearInitialAdd,
+  initialSearch,
+  onClearInitialSearch,
+  initialStatus,
+  onClearInitialStatus,
   onNavigateExcel,
   onToast,
 }: {
   currency: string;
   isAdmin: boolean;
+  canExportExcel?: boolean;
   initialAddOpen?: boolean;
   onClearInitialAdd?: () => void;
+  initialSearch?: string;
+  onClearInitialSearch?: () => void;
+  initialStatus?: string;
+  onClearInitialStatus?: () => void;
   onNavigateExcel: () => void;
   onToast: (msg: string, type?: 'success' | 'error') => void;
 }) {
@@ -64,6 +98,8 @@ export function ClientsView({
   const [viewing, setViewing] = useState<Client | null>(null);
   const [deleting, setDeleting] = useState<Client | null>(null);
   const [busy, setBusy] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [updatingKey, setUpdatingKey] = useState<string | null>(null);
 
   const loadClients = async () => {
     setLoading(true);
@@ -90,11 +126,28 @@ export function ClientsView({
     }
   }, [initialAddOpen, isAdmin]);
 
+  useEffect(() => {
+    if (initialSearch) {
+      setSearch(initialSearch);
+      setStatusFilter('All');
+      setPaymentFilter('All');
+      onClearInitialSearch?.();
+    }
+  }, [initialSearch]);
+
+  useEffect(() => {
+    if (initialStatus) {
+      setStatusFilter(initialStatus);
+      onClearInitialStatus?.();
+    }
+  }, [initialStatus]);
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return clients.filter((c) => {
       const matchQ =
         !q ||
+        String(c._id).toLowerCase().includes(q) ||
         c.clientId.toLowerCase().includes(q) ||
         c.clientName.toLowerCase().includes(q) ||
         c.companyName.toLowerCase().includes(q) ||
@@ -175,6 +228,77 @@ export function ClientsView({
     }
   };
 
+  const handleExportCsv = () => {
+    if (filtered.length === 0) {
+      onToast('No matching client records to export', 'error');
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const count = exportToCsv(
+      `host_finder_clients_${today}.csv`,
+      [
+        { header: 'Client ID', accessor: (c) => c.clientId },
+        { header: 'Client Name', accessor: (c) => c.clientName },
+        { header: 'Company Name', accessor: (c) => c.companyName },
+        { header: 'Email', accessor: (c) => c.email },
+        { header: 'Mobile', accessor: (c) => c.mobile },
+        { header: 'Address', accessor: (c) => c.address },
+        { header: 'Service Provider', accessor: (c) => c.serviceProvider },
+        { header: 'Service Type', accessor: (c) => c.serviceType },
+        { header: 'Start Date', accessor: (c) => (c.startDate ? String(c.startDate).slice(0, 10) : '') },
+        { header: 'End Date', accessor: (c) => (c.endDate ? String(c.endDate).slice(0, 10) : '') },
+        { header: 'Service Price', accessor: (c) => c.servicePrice },
+        { header: 'Renewal Price', accessor: (c) => c.renewalPrice },
+        { header: 'Currency', accessor: () => currency },
+        { header: 'Payment Status', accessor: (c) => c.paymentStatus },
+        { header: 'Account Status', accessor: (c) => c.accountStatus },
+        { header: 'Notes', accessor: (c) => c.notes },
+      ],
+      filtered
+    );
+    onToast(`Exported ${count} client record${count === 1 ? '' : 's'} to CSV`, 'success');
+  };
+
+  const handleExportExcel = async () => {
+    setExportingExcel(true);
+    try {
+      const params = new URLSearchParams({ type: 'clients' });
+      if (statusFilter !== 'All') params.set('status', statusFilter);
+      const filename = await downloadAuthenticatedFile(
+        `/api/excel/export?${params.toString()}`,
+        'host_finder_clients.xlsx'
+      );
+      onToast(`Downloaded ${filename}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
+  const handleInlineStatusChange = async (
+    client: Client,
+    patch: { accountStatus?: Client['accountStatus']; paymentStatus?: Client['paymentStatus'] }
+  ) => {
+    const key = `${client._id}-${patch.accountStatus ? 'acc' : 'pay'}`;
+    setUpdatingKey(key);
+    try {
+      const res = await apiFetch<{ item: Client }>(`/api/clients/${client._id}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      });
+      setClients((prev) => prev.map((c) => (c._id === client._id ? res.item : c)));
+      onToast(
+        `${client.clientId} marked as ${patch.accountStatus || patch.paymentStatus}`,
+        'success'
+      );
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setUpdatingKey(null);
+    }
+  };
+
   return (
     <div className="space-y-5">
       {/* Toolbar */}
@@ -215,7 +339,7 @@ export function ClientsView({
           </select>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {isAdmin && (
             <button
               type="button"
@@ -226,13 +350,26 @@ export function ClientsView({
               Import
             </button>
           )}
-          <a
-            href="/api/excel/export?type=clients"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={loading || filtered.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
           >
-            <Download className="h-3.5 w-3.5" />
-            Export
-          </a>
+            <FileDown className="h-3.5 w-3.5" />
+            Export CSV
+          </button>
+          {canExportExcel && (
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              disabled={exportingExcel}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+            >
+              <Download className="h-3.5 w-3.5" />
+              {exportingExcel ? 'Exporting...' : 'Export Excel'}
+            </button>
+          )}
           {isAdmin && (
             <button
               type="button"
@@ -312,10 +449,34 @@ export function ClientsView({
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <StatusLabel status={c.paymentStatus} />
+                      {isAdmin ? (
+                        <InlineStatusSelect
+                          ariaLabel={`Payment status for ${c.clientId}`}
+                          value={c.paymentStatus}
+                          options={PAYMENT_STATUS_OPTIONS}
+                          disabled={updatingKey === `${c._id}-pay`}
+                          onChange={(next) =>
+                            handleInlineStatusChange(c, { paymentStatus: next })
+                          }
+                        />
+                      ) : (
+                        <StatusLabel status={c.paymentStatus} />
+                      )}
                     </td>
                     <td className="px-4 py-3">
-                      <StatusLabel status={c.accountStatus} />
+                      {isAdmin ? (
+                        <InlineStatusSelect
+                          ariaLabel={`Account status for ${c.clientId}`}
+                          value={c.accountStatus}
+                          options={ACCOUNT_STATUS_OPTIONS}
+                          disabled={updatingKey === `${c._id}-acc`}
+                          onChange={(next) =>
+                            handleInlineStatusChange(c, { accountStatus: next })
+                          }
+                        />
+                      ) : (
+                        <StatusLabel status={c.accountStatus} />
+                      )}
                     </td>
                     <td className="px-5 py-3 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1">

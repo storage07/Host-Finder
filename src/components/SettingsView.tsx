@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { BookOpen, Database, KeyRound, Save, ShieldCheck } from 'lucide-react';
+import { BookOpen, Download, FileArchive, KeyRound, Save, ShieldCheck } from 'lucide-react';
 import { AppSettings, AuthUser } from '../types';
-import { apiFetch } from '../utils/api';
+import { apiFetch, getStoredToken } from '../utils/api';
 import { inputCls, labelCls, TableSkeleton } from './UI';
 
 export function SettingsView({
@@ -16,10 +16,10 @@ export function SettingsView({
   onToast: (msg: string, type?: 'success' | 'error') => void;
 }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [dbInfo, setDbInfo] = useState<{ mode: string; info: string; collections: string[] } | null>(null);
   const [apiDocs, setApiDocs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [downloadingZip, setDownloadingZip] = useState(false);
 
   // Password Change
   const [currentPassword, setCurrentPassword] = useState('');
@@ -34,12 +34,11 @@ export function SettingsView({
 
   useEffect(() => {
     Promise.all([
-      apiFetch<{ settings: AppSettings; database: any }>('/api/settings'),
+      apiFetch<{ settings: AppSettings }>('/api/settings'),
       apiFetch<{ endpoints: any[] }>('/api/docs'),
     ])
       .then(([sRes, dRes]) => {
         setSettings(sRes.settings);
-        setDbInfo(sRes.database);
         setApiDocs(dRes.endpoints || []);
       })
       .catch((err) => onToast((err as Error).message, 'error'))
@@ -120,6 +119,50 @@ export function SettingsView({
       onToast('Two-Factor Authentication disabled', 'success');
     } catch (err) {
       onToast((err as Error).message, 'error');
+    }
+  };
+
+  const handleDownloadSourceZip = async () => {
+    setDownloadingZip(true);
+    try {
+      const token = getStoredToken();
+      const headers = new Headers();
+      if (token) headers.set('Authorization', `Bearer ${token}`);
+      const res = await fetch('/api/system/export-source', {
+        method: 'GET',
+        headers,
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        let message = `Failed to export source archive (${res.status})`;
+        try {
+          const data = await res.json();
+          if (data?.error) message = data.error;
+        } catch {
+          // ignore parse error
+        }
+        throw new Error(message);
+      }
+      const fileCount = res.headers.get('X-Archive-File-Count');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'host-finder-source.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      onToast(
+        fileCount
+          ? `Downloaded host-finder-source.zip (${fileCount} files)`
+          : 'Downloaded host-finder-source.zip',
+        'success'
+      );
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setDownloadingZip(false);
     }
   };
 
@@ -378,56 +421,55 @@ export function SettingsView({
         </div>
       </div>
 
-      {/* MongoDB Atlas & API Documentation Reference */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <div className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
-          <div className="flex items-center gap-2">
-            <Database className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              Database Architecture
-            </h3>
-          </div>
-          {dbInfo && (
-            <div className="mt-3 space-y-2 text-xs text-slate-600 dark:text-slate-400">
-              <p>
-                Active Driver:{' '}
-                <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">
-                  {dbInfo.mode}
-                </span>
-              </p>
-              <p>{dbInfo.info}</p>
-              <p className="pt-2 font-medium text-slate-700 dark:text-slate-300">
-                12 Collections Configured:
-              </p>
-              <p className="font-mono text-[11px] leading-relaxed">
-                {dbInfo.collections.join(', ')}
-              </p>
-            </div>
-          )}
+      {/* API Documentation Reference */}
+      <div className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex items-center gap-2">
+          <BookOpen className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+            REST API Endpoints Reference
+          </h3>
         </div>
-
-        <div className="lg:col-span-2 rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
-          <div className="flex items-center gap-2">
-            <BookOpen className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              REST API Endpoints Reference
-            </h3>
-          </div>
-          <div className="mt-3 max-h-60 overflow-y-auto divide-y divide-slate-100 text-xs dark:divide-slate-800">
-            {apiDocs.map((ep, i) => (
-              <div key={i} className="flex flex-wrap items-baseline justify-between gap-2 py-2">
-                <div className="font-mono">
-                  <span className="font-semibold text-blue-600 dark:text-blue-400">
-                    {ep.method}
-                  </span>{' '}
-                  <span className="text-slate-900 dark:text-slate-100">{ep.path}</span>
-                </div>
-                <span className="text-slate-500 dark:text-slate-400">{ep.description}</span>
+        <div className="mt-3 max-h-60 overflow-y-auto divide-y divide-slate-100 text-xs dark:divide-slate-800">
+          {apiDocs.map((ep, i) => (
+            <div key={i} className="flex flex-wrap items-baseline justify-between gap-2 py-2">
+              <div className="font-mono">
+                <span className="font-semibold text-blue-600 dark:text-blue-400">
+                  {ep.method}
+                </span>{' '}
+                <span className="text-slate-900 dark:text-slate-100">{ep.path}</span>
               </div>
-            ))}
-          </div>
+              <span className="text-slate-500 dark:text-slate-400">{ep.description}</span>
+            </div>
+          ))}
         </div>
       </div>
+
+      {isAdmin && (
+        <div className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <FileArchive className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  Project Source Export
+                </h3>
+              </div>
+              <p className="text-xs text-slate-600 dark:text-slate-400">
+                Download the complete Host Finder codebase (server/, src/, package.json, tsconfig.json, vite.config.ts, .env.example, and README.md) as a portable ZIP archive. Runtime secrets (.env*), local preview storage (.data), dist, and node_modules are excluded automatically.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleDownloadSourceZip}
+              disabled={downloadingZip}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              <Download className="h-3.5 w-3.5" />
+              {downloadingZip ? 'Packaging ZIP...' : 'Download Source ZIP'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

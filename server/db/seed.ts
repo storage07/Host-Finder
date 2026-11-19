@@ -10,6 +10,18 @@ function addDaysIso(days: number): string {
   return d.toISOString();
 }
 
+let seedPromise: Promise<void> | null = null;
+
+export function ensureSeededOnce(): Promise<void> {
+  if (!seedPromise) {
+    seedPromise = seedDatabase().catch((err) => {
+      seedPromise = null;
+      throw err;
+    });
+  }
+  return seedPromise;
+}
+
 export async function seedDatabase(): Promise<void> {
   // 1. Seed Settings
   const existingSettings = await db.settings.findOne({ key: 'global' });
@@ -59,36 +71,43 @@ export async function seedDatabase(): Promise<void> {
   }
 
   // Seed Staff & Viewer demo accounts
-  const staffHash = await bcrypt.hash('Staff@2026!', 10);
-  const viewerHash = await bcrypt.hash('Viewer@2026!', 10);
+  const existingStaff = await db.users.findOne({ username: 'staff_ops' });
+  if (!existingStaff) {
+    const staffHash = await bcrypt.hash('Staff@2026!', 10);
+    await db.users.create({
+      uid: 'local_staff_ops',
+      username: 'staff_ops',
+      fullName: 'Aarav Mehta',
+      email: 'aarav.ops@hostfinder.in',
+      passwordHash: staffHash,
+      role: 'staff',
+      assignedClientIds: ['HF-CLT-0001', 'HF-CLT-0002', 'HF-CLT-0003'],
+      canUpdateAssignedServices: true,
+      mustChangePassword: false,
+      failedLoginAttempts: 0,
+      twoFactorEnabled: false,
+      isActive: true,
+    });
+  }
 
-  await db.users.create({
-    username: 'staff_ops',
-    fullName: 'Aarav Mehta',
-    email: 'aarav.ops@hostfinder.in',
-    passwordHash: staffHash,
-    role: 'staff',
-    assignedClientIds: ['HF-CLT-0001', 'HF-CLT-0002', 'HF-CLT-0003'],
-    canUpdateAssignedServices: true,
-    mustChangePassword: false,
-    failedLoginAttempts: 0,
-    twoFactorEnabled: false,
-    isActive: true,
-  });
-
-  await db.users.create({
-    username: 'audit_viewer',
-    fullName: 'Priya Nair',
-    email: 'priya.audit@hostfinder.in',
-    passwordHash: viewerHash,
-    role: 'viewer',
-    assignedClientIds: [],
-    canUpdateAssignedServices: false,
-    mustChangePassword: false,
-    failedLoginAttempts: 0,
-    twoFactorEnabled: false,
-    isActive: true,
-  });
+  const existingViewer = await db.users.findOne({ username: 'audit_viewer' });
+  if (!existingViewer) {
+    const viewerHash = await bcrypt.hash('Viewer@2026!', 10);
+    await db.users.create({
+      uid: 'local_audit_viewer',
+      username: 'audit_viewer',
+      fullName: 'Priya Nair',
+      email: 'priya.audit@hostfinder.in',
+      passwordHash: viewerHash,
+      role: 'viewer',
+      assignedClientIds: [],
+      canUpdateAssignedServices: false,
+      mustChangePassword: false,
+      failedLoginAttempts: 0,
+      twoFactorEnabled: false,
+      isActive: true,
+    });
+  }
 
   // 3. Seed Providers (all 5 categories)
   const p1 = await db.providers.create({

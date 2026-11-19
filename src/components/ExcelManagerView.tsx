@@ -8,7 +8,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { Client } from '../types';
-import { apiFetch } from '../utils/api';
+import { apiFetch, downloadAuthenticatedFile } from '../utils/api';
 import { inputCls, labelCls } from './UI';
 
 export function ExcelManagerView({
@@ -26,6 +26,8 @@ export function ExcelManagerView({
   } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [downloadingTemplate, setDownloadingTemplate] = useState(false);
+  const [downloadingWorkbook, setDownloadingWorkbook] = useState(false);
 
   // Export filters
   const [exportType, setExportType] = useState('clients');
@@ -96,6 +98,36 @@ export function ExcelManagerView({
     return `/api/excel/export?${params.toString()}`;
   };
 
+  const handleDownloadTemplate = async () => {
+    setDownloadingTemplate(true);
+    try {
+      const filename = await downloadAuthenticatedFile(
+        '/api/excel/template',
+        'host_finder_clients_template.xlsx'
+      );
+      onToast(`Downloaded ${filename}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setDownloadingTemplate(false);
+    }
+  };
+
+  const handleDownloadWorkbook = async () => {
+    setDownloadingWorkbook(true);
+    try {
+      const filename = await downloadAuthenticatedFile(
+        buildExportUrl(),
+        `host_finder_${exportType}.xlsx`
+      );
+      onToast(`Downloaded ${filename}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setDownloadingWorkbook(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -110,13 +142,15 @@ export function ExcelManagerView({
                 Upload an .xlsx workbook. Records are validated for schema errors and duplicate emails before import.
               </p>
             </div>
-            <a
-              href="/api/excel/template"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+            <button
+              type="button"
+              onClick={handleDownloadTemplate}
+              disabled={downloadingTemplate}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
             >
               <Download className="h-3.5 w-3.5" />
-              Sample Template
-            </a>
+              {downloadingTemplate ? 'Downloading...' : 'Sample Template'}
+            </button>
           </div>
 
           {!isAdmin ? (
@@ -214,8 +248,10 @@ export function ExcelManagerView({
                 <option value="Expired">Expired</option>
                 <option value="Renewed">Renewed</option>
                 <option value="Cancelled">Cancelled</option>
-                <option value="Paid">Paid (Invoices)</option>
-                <option value="Pending">Pending (Invoices)</option>
+                <option value="Paid">Paid (Invoices / Payment)</option>
+                <option value="Pending">Pending (Invoices / Payment)</option>
+                <option value="Overdue">Overdue (Invoices / Payment)</option>
+                <option value="Partial">Partial (Payment)</option>
               </select>
             </div>
             <div className="sm:col-span-2">
@@ -231,13 +267,15 @@ export function ExcelManagerView({
           </div>
 
           <div className="mt-5 flex justify-end">
-            <a
-              href={buildExportUrl()}
-              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700"
+            <button
+              type="button"
+              onClick={handleDownloadWorkbook}
+              disabled={downloadingWorkbook}
+              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               <Download className="h-3.5 w-3.5" />
-              Download .xlsx Workbook
-            </a>
+              {downloadingWorkbook ? 'Generating .xlsx...' : 'Download .xlsx Workbook'}
+            </button>
           </div>
         </div>
       </div>

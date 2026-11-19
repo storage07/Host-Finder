@@ -1,16 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Download, Edit2, Eye, Plus, Search, Trash2 } from 'lucide-react';
+import { Download, Edit2, Eye, FileDown, Plus, Search, Trash2 } from 'lucide-react';
 import { AuthUser, Client, DomainRecord } from '../types';
 import {
   apiFetch,
   daysRemaining,
+  downloadAuthenticatedFile,
   formatDate,
   formatMoney,
   toInputDate,
 } from '../utils/api';
+import { exportToCsv } from '../utils/csv';
 import {
   ConfirmDialog,
   EmptyState,
+  InlineStatusSelect,
   inputCls,
   labelCls,
   Modal,
@@ -18,6 +21,14 @@ import {
   StatusLabel,
   TableSkeleton,
 } from './UI';
+
+const DOMAIN_STATUS_OPTIONS: readonly DomainRecord['accountStatus'][] = [
+  'Active',
+  'Upcoming Expiry',
+  'Expired',
+  'Renewed',
+  'Cancelled',
+];
 
 const BLANK_DOMAIN = {
   clientId: '',
@@ -37,10 +48,18 @@ const BLANK_DOMAIN = {
 export function DomainsView({
   user,
   currency,
+  initialSearch,
+  onClearInitialSearch,
+  initialStatus,
+  onClearInitialStatus,
   onToast,
 }: {
   user: AuthUser;
   currency: string;
+  initialSearch?: string;
+  onClearInitialSearch?: () => void;
+  initialStatus?: string;
+  onClearInitialStatus?: () => void;
   onToast: (msg: string, type?: 'success' | 'error') => void;
 }) {
   const [items, setItems] = useState<DomainRecord[]>([]);
@@ -55,6 +74,8 @@ export function DomainsView({
   const [viewing, setViewing] = useState<DomainRecord | null>(null);
   const [deleting, setDeleting] = useState<DomainRecord | null>(null);
   const [busy, setBusy] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
 
   const isAdmin = user.role === 'admin';
   const canEdit = (clientId: string) =>
@@ -80,11 +101,28 @@ export function DomainsView({
     loadAll();
   }, []);
 
+  useEffect(() => {
+    if (initialSearch) {
+      setSearch(initialSearch);
+      setStatusFilter('All');
+      onClearInitialSearch?.();
+    }
+  }, [initialSearch]);
+
+  useEffect(() => {
+    if (initialStatus) {
+      setStatusFilter(initialStatus);
+      onClearInitialStatus?.();
+    }
+  }, [initialStatus]);
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return items.filter((d) => {
       const matchQ =
         !q ||
+        String(d._id).toLowerCase().includes(q) ||
+        d.clientId.toLowerCase().includes(q) ||
         d.domainName.toLowerCase().includes(q) ||
         d.domainRegistrar.toLowerCase().includes(q) ||
         d.clientName.toLowerCase().includes(q) ||
@@ -162,6 +200,68 @@ export function DomainsView({
     }
   };
 
+  const handleExportCsv = () => {
+    if (filtered.length === 0) {
+      onToast('No matching domain records to export', 'error');
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const count = exportToCsv(
+      `host_finder_domains_${today}.csv`,
+      [
+        { header: 'Client ID', accessor: (d) => d.clientId },
+        { header: 'Client Name', accessor: (d) => d.clientName },
+        { header: 'Domain Name', accessor: (d) => d.domainName },
+        { header: 'Registrar', accessor: (d) => d.domainRegistrar },
+        { header: 'Registration Date', accessor: (d) => (d.registrationDate ? String(d.registrationDate).slice(0, 10) : '') },
+        { header: 'Expiry Date', accessor: (d) => (d.expiryDate ? String(d.expiryDate).slice(0, 10) : '') },
+        { header: 'Renewal Price', accessor: (d) => d.renewalPrice },
+        { header: 'Currency', accessor: () => currency },
+        { header: 'Nameservers', accessor: (d) => (d.nameservers || []).join('; ') },
+        { header: 'Account Status', accessor: (d) => d.accountStatus },
+        { header: 'Notes', accessor: (d) => d.notes },
+      ],
+      filtered
+    );
+    onToast(`Exported ${count} domain record${count === 1 ? '' : 's'} to CSV`, 'success');
+  };
+
+  const handleExportExcel = async () => {
+    setExportingExcel(true);
+    try {
+      const params = new URLSearchParams({ type: 'domains' });
+      if (statusFilter !== 'All') params.set('status', statusFilter);
+      const filename = await downloadAuthenticatedFile(
+        `/api/excel/export?${params.toString()}`,
+        'host_finder_domains.xlsx'
+      );
+      onToast(`Downloaded ${filename}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
+  const handleInlineStatusChange = async (
+    domain: DomainRecord,
+    nextStatus: DomainRecord['accountStatus']
+  ) => {
+    setUpdatingId(domain._id);
+    try {
+      const res = await apiFetch<{ item: DomainRecord }>(`/api/domains/${domain._id}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ accountStatus: nextStatus }),
+      });
+      setItems((prev) => prev.map((d) => (d._id === domain._id ? res.item : d)));
+      onToast(`${domain.domainName} marked as ${nextStatus}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -190,15 +290,26 @@ export function DomainsView({
           </select>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={loading || filtered.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+          >
+            <FileDown className="h-3.5 w-3.5" />
+            Export CSV
+          </button>
           {user.role !== 'viewer' && (
-            <a
-              href="/api/excel/export?type=domains"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              disabled={exportingExcel}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
             >
               <Download className="h-3.5 w-3.5" />
-              Export Domains
-            </a>
+              {exportingExcel ? 'Exporting...' : 'Export Excel'}
+            </button>
           )}
           {isAdmin && (
             <button
@@ -285,7 +396,17 @@ export function DomainsView({
                         {formatMoney(d.renewalPrice, currency)}
                       </td>
                       <td className="px-4 py-3">
-                        <StatusLabel status={d.accountStatus} />
+                        {canEdit(d.clientId) ? (
+                          <InlineStatusSelect
+                            ariaLabel={`Status for ${d.domainName}`}
+                            value={d.accountStatus}
+                            options={DOMAIN_STATUS_OPTIONS}
+                            disabled={updatingId === d._id}
+                            onChange={(next) => handleInlineStatusChange(d, next)}
+                          />
+                        ) : (
+                          <StatusLabel status={d.accountStatus} />
+                        )}
                       </td>
                       <td className="px-5 py-3 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1">

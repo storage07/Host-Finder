@@ -4,11 +4,14 @@ import { ActivityLog, Client, ManagedUser, UserRole } from '../types';
 import { apiFetch, formatDate } from '../utils/api';
 import {
   ConfirmDialog,
+  InlineStatusSelect,
   inputCls,
   labelCls,
   Modal,
   TableSkeleton,
 } from './UI';
+
+const USER_STATE_OPTIONS = ['Active', 'Disabled'] as const;
 
 export function UserManagementView({
   currentUserId,
@@ -27,6 +30,7 @@ export function UserManagementView({
   const [editing, setEditing] = useState<ManagedUser | null>(null);
   const [deleting, setDeleting] = useState<ManagedUser | null>(null);
   const [busy, setBusy] = useState(false);
+  const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null);
 
   const [username, setUsername] = useState('');
   const [fullName, setFullName] = useState('');
@@ -143,6 +147,25 @@ export function UserManagementView({
     }
   };
 
+  const handleToggleUserStatus = async (u: ManagedUser, next: 'Active' | 'Disabled') => {
+    setUpdatingStatusId(u._id);
+    try {
+      const nextActive = next === 'Active';
+      await apiFetch(`/api/users/${u._id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ isActive: nextActive }),
+      });
+      setUsers((prev) =>
+        prev.map((item) => (item._id === u._id ? { ...item, isActive: nextActive } : item))
+      );
+      onToast(`${u.username} set to ${next}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setUpdatingStatusId(null);
+    }
+  };
+
   const handleDelete = async () => {
     if (!deleting) return;
     setBusy(true);
@@ -248,12 +271,18 @@ export function UserManagementView({
                           <span className="font-semibold text-rose-600 dark:text-rose-400">
                             Locked ({u.failedLoginAttempts} fails)
                           </span>
-                        ) : u.isActive ? (
+                        ) : u._id !== currentUserId ? (
+                          <InlineStatusSelect
+                            ariaLabel={`Account state for ${u.username}`}
+                            value={u.isActive ? 'Active' : 'Disabled'}
+                            options={USER_STATE_OPTIONS}
+                            disabled={updatingStatusId === u._id}
+                            onChange={(next) => handleToggleUserStatus(u, next)}
+                          />
+                        ) : (
                           <span className="font-semibold text-emerald-600 dark:text-emerald-400">
                             Active
                           </span>
-                        ) : (
-                          <span className="text-slate-500">Disabled</span>
                         )}
                       </td>
                       <td className="px-5 py-3 text-right whitespace-nowrap">

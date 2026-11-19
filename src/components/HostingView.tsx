@@ -1,16 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Download, Edit2, Plus, Search, Trash2 } from 'lucide-react';
+import { Download, Edit2, FileDown, Plus, Search, Trash2 } from 'lucide-react';
 import { AuthUser, Client, HostingService } from '../types';
 import {
   apiFetch,
   daysRemaining,
+  downloadAuthenticatedFile,
   formatDate,
   formatMoney,
   toInputDate,
 } from '../utils/api';
+import { exportToCsv } from '../utils/csv';
 import {
   ConfirmDialog,
   EmptyState,
+  InlineStatusSelect,
   inputCls,
   labelCls,
   Modal,
@@ -18,6 +21,14 @@ import {
   StatusLabel,
   TableSkeleton,
 } from './UI';
+
+const HOSTING_STATUS_OPTIONS: readonly HostingService['accountStatus'][] = [
+  'Active',
+  'Upcoming Expiry',
+  'Expired',
+  'Renewed',
+  'Cancelled',
+];
 
 const BLANK_HOSTING = {
   clientId: '',
@@ -39,10 +50,18 @@ const BLANK_HOSTING = {
 export function HostingView({
   user,
   currency,
+  initialSearch,
+  onClearInitialSearch,
+  initialStatus,
+  onClearInitialStatus,
   onToast,
 }: {
   user: AuthUser;
   currency: string;
+  initialSearch?: string;
+  onClearInitialSearch?: () => void;
+  initialStatus?: string;
+  onClearInitialStatus?: () => void;
   onToast: (msg: string, type?: 'success' | 'error') => void;
 }) {
   const [items, setItems] = useState<HostingService[]>([]);
@@ -56,6 +75,8 @@ export function HostingView({
   const [form, setForm] = useState(BLANK_HOSTING);
   const [deleting, setDeleting] = useState<HostingService | null>(null);
   const [busy, setBusy] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
 
   const isAdmin = user.role === 'admin';
   const canEdit = (clientId: string) =>
@@ -81,11 +102,28 @@ export function HostingView({
     loadAll();
   }, []);
 
+  useEffect(() => {
+    if (initialSearch) {
+      setSearch(initialSearch);
+      setStatusFilter('All');
+      onClearInitialSearch?.();
+    }
+  }, [initialSearch]);
+
+  useEffect(() => {
+    if (initialStatus) {
+      setStatusFilter(initialStatus);
+      onClearInitialStatus?.();
+    }
+  }, [initialStatus]);
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return items.filter((h) => {
       const matchQ =
         !q ||
+        String(h._id).toLowerCase().includes(q) ||
+        h.clientId.toLowerCase().includes(q) ||
         h.domainName.toLowerCase().includes(q) ||
         h.hostingProvider.toLowerCase().includes(q) ||
         h.hostingPlan.toLowerCase().includes(q) ||
@@ -167,6 +205,72 @@ export function HostingView({
     }
   };
 
+  const handleExportCsv = () => {
+    if (filtered.length === 0) {
+      onToast('No matching hosting records to export', 'error');
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const count = exportToCsv(
+      `host_finder_hosting_${today}.csv`,
+      [
+        { header: 'Client ID', accessor: (h) => h.clientId },
+        { header: 'Client Name', accessor: (h) => h.clientName },
+        { header: 'Domain Name', accessor: (h) => h.domainName },
+        { header: 'Hosting Provider', accessor: (h) => h.hostingProvider },
+        { header: 'Hosting Plan', accessor: (h) => h.hostingPlan },
+        { header: 'Server Name', accessor: (h) => h.serverName },
+        { header: 'Server IP', accessor: (h) => h.serverIp },
+        { header: 'Control Panel Username', accessor: (h) => h.username },
+        { header: 'Provider Email', accessor: (h) => h.providerEmail },
+        { header: 'Start Date', accessor: (h) => (h.startDate ? String(h.startDate).slice(0, 10) : '') },
+        { header: 'Expiry Date', accessor: (h) => (h.expiryDate ? String(h.expiryDate).slice(0, 10) : '') },
+        { header: 'Renewal Amount', accessor: (h) => h.renewalAmount },
+        { header: 'Currency', accessor: () => currency },
+        { header: 'Account Status', accessor: (h) => h.accountStatus },
+        { header: 'Notes', accessor: (h) => h.notes },
+      ],
+      filtered
+    );
+    onToast(`Exported ${count} hosting record${count === 1 ? '' : 's'} to CSV`, 'success');
+  };
+
+  const handleExportExcel = async () => {
+    setExportingExcel(true);
+    try {
+      const params = new URLSearchParams({ type: 'hosting' });
+      if (statusFilter !== 'All') params.set('status', statusFilter);
+      const filename = await downloadAuthenticatedFile(
+        `/api/excel/export?${params.toString()}`,
+        'host_finder_hosting.xlsx'
+      );
+      onToast(`Downloaded ${filename}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
+  const handleInlineStatusChange = async (
+    hosting: HostingService,
+    nextStatus: HostingService['accountStatus']
+  ) => {
+    setUpdatingId(hosting._id);
+    try {
+      const res = await apiFetch<{ item: HostingService }>(`/api/hosting/${hosting._id}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ accountStatus: nextStatus }),
+      });
+      setItems((prev) => prev.map((h) => (h._id === hosting._id ? res.item : h)));
+      onToast(`${hosting.domainName} marked as ${nextStatus}`, 'success');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -195,15 +299,26 @@ export function HostingView({
           </select>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={loading || filtered.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+          >
+            <FileDown className="h-3.5 w-3.5" />
+            Export CSV
+          </button>
           {user.role !== 'viewer' && (
-            <a
-              href="/api/excel/export?type=hosting"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              disabled={exportingExcel}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
             >
               <Download className="h-3.5 w-3.5" />
-              Export Hosting
-            </a>
+              {exportingExcel ? 'Exporting...' : 'Export Excel'}
+            </button>
           )}
           {isAdmin && (
             <button
@@ -292,7 +407,17 @@ export function HostingView({
                         {formatMoney(h.renewalAmount, currency)}
                       </td>
                       <td className="px-4 py-3">
-                        <StatusLabel status={h.accountStatus} />
+                        {canEdit(h.clientId) ? (
+                          <InlineStatusSelect
+                            ariaLabel={`Status for ${h.domainName}`}
+                            value={h.accountStatus}
+                            options={HOSTING_STATUS_OPTIONS}
+                            disabled={updatingId === h._id}
+                            onChange={(next) => handleInlineStatusChange(h, next)}
+                          />
+                        ) : (
+                          <StatusLabel status={h.accountStatus} />
+                        )}
                       </td>
                       <td className="px-5 py-3 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1">
